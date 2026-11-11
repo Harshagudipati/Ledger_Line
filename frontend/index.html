@@ -4,15 +4,21 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LedgerLine / BalanceVault - Double-Entry Ledger System</title>
-    <!-- Modern Tailwind CSS CDN for pristine styling -->
+    <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         .gradient-header {
             background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f766e 100%);
         }
-        .code-font {
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        @media print {
+            header, section, .tab-button, #action-panel, .no-print {
+                display: none !important;
+            }
+            main {
+                max-width: 100% !important;
+                padding: 0 !important;
+            }
         }
     </style>
 </head>
@@ -36,20 +42,27 @@
             <!-- Role / Quick Demo User Switcher -->
             <div class="flex items-center flex-wrap gap-2 text-sm">
                 <span class="text-xs text-slate-400 mr-1 hidden sm:inline">Demo Persona:</span>
-                <button onclick="loginAs('alice')" class="persona-btn px-2.5 py-1 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition" id="btn-alice">
-                    <i class="fa-solid fa-user text-blue-400 mr-1"></i> Alice (Holder)
+                <button onclick="loginAs('alice')" class="persona-btn px-2.5 py-1 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition" id="btn-alice" title="Alice - Pre-funded $1,000 Checking Account">
+                    <i class="fa-solid fa-user text-blue-400 mr-1"></i> Alice
                 </button>
-                <button onclick="loginAs('bob')" class="persona-btn px-2.5 py-1 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition" id="btn-bob">
-                    <i class="fa-solid fa-user text-indigo-400 mr-1"></i> Bob (Holder)
+                <button onclick="loginAs('bob')" class="persona-btn px-2.5 py-1 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition" id="btn-bob" title="Bob - Pre-funded $500 Checking Account">
+                    <i class="fa-solid fa-user text-indigo-400 mr-1"></i> Bob
                 </button>
-                <button onclick="loginAs('admin')" class="persona-btn px-2.5 py-1 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition" id="btn-admin">
+                <button onclick="loginAs('charlie')" class="persona-btn px-2.5 py-1 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-300 transition" id="btn-charlie" title="Charlie - Pending User (Tests FR-6/7 Onboarding)">
+                    <i class="fa-solid fa-user-clock text-amber-400 mr-1"></i> Charlie (Pending)
+                </button>
+                <button onclick="loginAs('admin')" class="persona-btn px-2.5 py-1 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition" id="btn-admin" title="Admin - Operator with user approval powers">
                     <i class="fa-solid fa-shield-halved text-amber-400 mr-1"></i> Admin
                 </button>
-                <button onclick="loginAs('auditor')" class="persona-btn px-2.5 py-1 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition" id="btn-auditor">
+                <button onclick="loginAs('auditor')" class="persona-btn px-2.5 py-1 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition" id="btn-auditor" title="Auditor - Read-only compliance inspector">
                     <i class="fa-solid fa-scale-balanced text-teal-400 mr-1"></i> Auditor
                 </button>
-                <button onclick="showLoginModal()" class="px-2.5 py-1 rounded-lg text-xs bg-teal-600 hover:bg-teal-500 text-white font-medium transition shadow-sm ml-2">
+                <div class="h-4 w-px bg-slate-700 mx-1 hidden sm:block"></div>
+                <button onclick="showLoginModal()" class="px-2.5 py-1 rounded-lg text-xs bg-teal-600 hover:bg-teal-500 text-white font-medium transition shadow-sm" title="Custom login or self-registration">
                     <i class="fa-solid fa-arrow-right-to-bracket mr-1"></i> Auth
+                </button>
+                <button onclick="logout()" class="px-2 py-1 rounded-lg text-xs bg-slate-800 hover:bg-rose-900/60 border border-slate-700 hover:border-rose-500 text-slate-300 hover:text-white transition" title="Log out of active session">
+                    <i class="fa-solid fa-power-off text-rose-400"></i>
                 </button>
             </div>
         </div>
@@ -71,7 +84,7 @@
             <div class="flex items-center gap-4">
                 <div class="flex items-center gap-1.5" id="conservation-pill">
                     <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                    <span class="text-slate-600 font-medium">Ledger Balance:</span>
+                    <span class="text-slate-600 font-medium">Ledger Conservation:</span>
                     <span id="conservation-status-text" class="text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
                         Zero-Sum Conserved (Δ = $0.00)
                     </span>
@@ -111,6 +124,22 @@
         <!-- TAB 1: ACCOUNT HOLDER DASHBOARD -->
         <!-- =================================================================== -->
         <div id="holder-tab" class="tab-content space-y-6">
+            
+            <!-- Account Switcher Bar (FR-9 Multiple Accounts) -->
+            <div class="flex flex-wrap justify-between items-center bg-white p-3.5 rounded-xl border border-slate-200 shadow-sm gap-3">
+                <div class="flex items-center gap-2">
+                    <span class="text-xs font-semibold text-slate-600">Active Account:</span>
+                    <select id="user-accounts-select" onchange="switchActiveAccount(this.value)" class="text-xs font-mono font-medium bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 focus:ring-2 focus:ring-teal-500 focus:outline-none">
+                        <!-- Populated dynamically with user's accounts -->
+                    </select>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button onclick="openNewAccountModal()" class="px-3 py-1.5 rounded-lg bg-teal-50 hover:bg-teal-100 text-teal-700 border border-teal-200 text-xs font-medium transition flex items-center gap-1.5">
+                        <i class="fa-solid fa-plus text-teal-600"></i> Open Secondary Account
+                    </button>
+                </div>
+            </div>
+
             <!-- Balance Card & Action Buttons -->
             <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <!-- Account Card -->
@@ -120,7 +149,7 @@
                     </div>
                     <div class="flex justify-between items-start">
                         <div>
-                            <span class="text-xs uppercase tracking-wider text-teal-400 font-semibold bg-teal-900/50 px-2.5 py-0.5 rounded-full border border-teal-500/30">
+                            <span id="account-type-badge" class="text-xs uppercase tracking-wider text-teal-400 font-semibold bg-teal-900/50 px-2.5 py-0.5 rounded-full border border-teal-500/30">
                                 Primary Checking
                             </span>
                             <div class="text-xs text-slate-400 mt-2">Account Number</div>
@@ -142,13 +171,13 @@
                         </div>
                         <div class="text-xs text-slate-400 text-right">
                             <div>Protected by ACID Row Locking</div>
-                            <div class="text-teal-400">Zero Negative Balances Allowed</div>
+                            <div class="text-teal-400 font-medium">Zero Negative Balances Allowed</div>
                         </div>
                     </div>
                 </div>
 
                 <!-- Action Panel -->
-                <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col justify-between space-y-3">
+                <div id="action-panel" class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col justify-between space-y-3">
                     <h3 class="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
                         <i class="fa-solid fa-money-bill-transfer text-teal-600"></i> Money Operations
                     </h3>
@@ -171,16 +200,24 @@
 
             <!-- Account Statement Table -->
             <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-                <div class="p-5 border-b border-slate-200 flex justify-between items-center bg-slate-50/50">
+                <div class="p-5 border-b border-slate-200 flex flex-wrap justify-between items-center bg-slate-50/50 gap-3">
                     <div>
                         <h3 class="text-base font-bold text-slate-900 flex items-center gap-2">
-                            <i class="fa-solid fa-list-check text-teal-600"></i> Account Statement & Running Balance
+                            <i class="fa-solid fa-list-check text-teal-600"></i> Account Statement & Running Balance (FR-20)
                         </h3>
                         <p class="text-xs text-slate-500 mt-0.5">Audited chronological record of all debits and credits for this account</p>
                     </div>
-                    <button onclick="loadAccountStatement()" class="text-xs px-3 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium transition flex items-center gap-1.5">
-                        <i class="fa-solid fa-rotate-right"></i> Refresh
-                    </button>
+                    <div class="flex items-center gap-2">
+                        <button onclick="exportStatementCSV()" class="text-xs px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-medium transition flex items-center gap-1.5" title="Export statement entries to CSV">
+                            <i class="fa-solid fa-file-csv text-teal-600"></i> Export CSV
+                        </button>
+                        <button onclick="window.print()" class="text-xs px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-medium transition flex items-center gap-1.5" title="Print statement report">
+                            <i class="fa-solid fa-print"></i> Print
+                        </button>
+                        <button onclick="loadAccountStatement()" class="text-xs px-3 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium transition flex items-center gap-1.5">
+                            <i class="fa-solid fa-rotate-right"></i> Refresh
+                        </button>
+                    </div>
                 </div>
                 <div class="overflow-x-auto">
                     <table class="w-full text-left text-xs text-slate-700">
@@ -209,6 +246,21 @@
         <!-- TAB 2: ADMINISTRATOR DASHBOARD -->
         <!-- =================================================================== -->
         <div id="admin-tab" class="tab-content hidden space-y-6">
+            
+            <!-- Role Guard Banner (Displayed if logged in as Non-Admin) -->
+            <div id="admin-role-warning" class="hidden bg-amber-50 border border-amber-200 p-4 rounded-xl flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <i class="fa-solid fa-triangle-exclamation text-amber-500 text-xl"></i>
+                    <div>
+                        <div class="text-xs font-bold text-amber-800">Administrator Access Required</div>
+                        <div class="text-xs text-amber-700">You are currently viewing as an Account Holder. Switch to the Administrator persona to activate users and access management tools.</div>
+                    </div>
+                </div>
+                <button onclick="loginAs('admin')" class="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium text-xs shadow-sm transition">
+                    Switch to Admin
+                </button>
+            </div>
+
             <!-- Admin KPI Stats -->
             <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200">
@@ -235,16 +287,27 @@
 
             <!-- User Management & Onboarding Table -->
             <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-                <div class="p-5 border-b border-slate-200 flex justify-between items-center bg-slate-50/50">
+                <div class="p-5 border-b border-slate-200 flex flex-wrap justify-between items-center bg-slate-50/50 gap-3">
                     <div>
                         <h3 class="text-base font-bold text-slate-900 flex items-center gap-2">
                             <i class="fa-solid fa-user-check text-teal-600"></i> User Onboarding & Access Control (FR-6, FR-7, FR-8)
                         </h3>
                         <p class="text-xs text-slate-500 mt-0.5">Approve new self-registered holders or manage system permissions</p>
                     </div>
-                    <button onclick="loadAdminUsers()" class="text-xs px-3 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium transition flex items-center gap-1.5">
-                        <i class="fa-solid fa-rotate-right"></i> Refresh Users
-                    </button>
+                    <div class="flex items-center gap-2">
+                        <select id="admin-user-filter" onchange="loadAdminUsers()" class="text-xs bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 focus:ring-2 focus:ring-teal-500">
+                            <option value="">All Statuses</option>
+                            <option value="PENDING_APPROVAL">Pending Approval Only</option>
+                            <option value="ACTIVE">Active Users</option>
+                            <option value="DEACTIVATED">Deactivated Users</option>
+                        </select>
+                        <button onclick="resetDemoSeedData()" class="text-xs px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 font-medium transition flex items-center gap-1.5" title="Reset all users and accounts back to demo baseline">
+                            <i class="fa-solid fa-arrows-rotate text-rose-500"></i> Reset Demo DB
+                        </button>
+                        <button onclick="loadAdminUsers()" class="text-xs px-3 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium transition flex items-center gap-1.5">
+                            <i class="fa-solid fa-rotate-right"></i> Refresh Users
+                        </button>
+                    </div>
                 </div>
                 <div class="overflow-x-auto">
                     <table class="w-full text-left text-xs text-slate-700">
@@ -272,6 +335,21 @@
         <!-- TAB 3: AUDITOR & DOUBLE-ENTRY LEDGER DASHBOARD -->
         <!-- =================================================================== -->
         <div id="auditor-tab" class="tab-content hidden space-y-6">
+            
+            <!-- Role Guard Banner (Displayed if logged in as Non-Auditor/Non-Admin) -->
+            <div id="auditor-role-warning" class="hidden bg-teal-50 border border-teal-200 p-4 rounded-xl flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <i class="fa-solid fa-scale-balanced text-teal-600 text-xl"></i>
+                    <div>
+                        <div class="text-xs font-bold text-teal-900">Auditor Access Required</div>
+                        <div class="text-xs text-teal-700">You are currently viewing as an Account Holder. Switch to the Auditor persona to inspect general ledger lines and immutable audit trails.</div>
+                    </div>
+                </div>
+                <button onclick="loginAs('auditor')" class="px-3 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 text-white font-medium text-xs shadow-sm transition">
+                    Switch to Auditor
+                </button>
+            </div>
+
             <!-- Live Conservation Audit Panel -->
             <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
                 <div class="flex justify-between items-start flex-wrap gap-4">
@@ -346,16 +424,24 @@
 
             <!-- Immutable Audit Trail View -->
             <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-                <div class="p-5 border-b border-slate-200 flex justify-between items-center bg-slate-50/50">
+                <div class="p-5 border-b border-slate-200 flex flex-wrap justify-between items-center bg-slate-50/50 gap-3">
                     <div>
                         <h3 class="text-base font-bold text-slate-900 flex items-center gap-2">
                             <i class="fa-solid fa-fingerprint text-indigo-600"></i> Append-Only Immutable Audit Trail (FR-19, FR-21)
                         </h3>
                         <p class="text-xs text-slate-500 mt-0.5">Protected by database triggers against UPDATE and DELETE</p>
                     </div>
-                    <button onclick="loadAuditLogs()" class="text-xs px-3 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium transition flex items-center gap-1.5">
-                        <i class="fa-solid fa-rotate-right"></i> Refresh Audit
-                    </button>
+                    <div class="flex items-center gap-2">
+                        <select id="audit-status-filter" onchange="loadAuditLogs()" class="text-xs bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 focus:ring-2 focus:ring-teal-500">
+                            <option value="">All Statuses</option>
+                            <option value="SUCCESS">Success Only</option>
+                            <option value="FAILURE">Failures / Blocked Attempts</option>
+                            <option value="UNAUTHORIZED">Unauthorized Access</option>
+                        </select>
+                        <button onclick="loadAuditLogs()" class="text-xs px-3 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium transition flex items-center gap-1.5">
+                            <i class="fa-solid fa-rotate-right"></i> Refresh Audit
+                        </button>
+                    </div>
                 </div>
                 <div class="overflow-x-auto max-h-96">
                     <table class="w-full text-left text-xs text-slate-700">
@@ -450,6 +536,34 @@
     </footer>
 
     <!-- Modals -->
+    <!-- Open New Account Modal (FR-9) -->
+    <div id="new-account-modal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200">
+            <h3 class="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <i class="fa-solid fa-folder-plus text-teal-600"></i> Open New Account
+            </h3>
+            <p class="text-xs text-slate-500 mt-1">Create a secondary Savings or Checking account under your ownership.</p>
+
+            <form onsubmit="handleCreateAccount(event)" class="mt-4 space-y-4">
+                <div>
+                    <label class="block text-xs font-semibold text-slate-700">Account Type</label>
+                    <select id="new-account-type-select" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500">
+                        <option value="SAVINGS">High-Yield Savings Account</option>
+                        <option value="CHECKING">Secondary Checking Account</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-slate-700">Currency</label>
+                    <input type="text" value="USD" disabled class="w-full mt-1 px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg text-sm text-slate-500">
+                </div>
+                <div class="pt-2 flex justify-end gap-2">
+                    <button type="button" onclick="closeModals()" class="px-4 py-2 rounded-lg text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200">Cancel</button>
+                    <button type="submit" class="px-4 py-2 rounded-lg text-xs font-medium text-white bg-teal-600 hover:bg-teal-500">Create Account</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <!-- Deposit Modal -->
     <div id="deposit-modal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
         <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200">
@@ -566,4 +680,3 @@
     <script src="app.js"></script>
 </body>
 </html>
-

@@ -383,6 +383,15 @@ function createServer(dbInstance = null) {
                 return sendJson(res, 200, { stats });
             }
 
+            if (pathname === '/api/admin/reset-seed' && method === 'POST') {
+                if (!authenticate(req, res)) return;
+                if (!requireRole('ADMIN')(req, res)) return;
+
+                const { seedDatabase } = require('./db/seed');
+                seedDatabase(db);
+                return sendJson(res, 200, { message: 'Database demo data successfully re-seeded.' });
+            }
+
             // ----------------------------------------------------------------
             // 8. Static Frontend Serving (FR-22)
             // ----------------------------------------------------------------

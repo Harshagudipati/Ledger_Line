@@ -4,6 +4,7 @@ const API_BASE = window.location.origin;
 
 let currentUser = null;
 let currentToken = null;
+let userAccounts = [];
 let currentAccount = null;
 let isRegisterMode = false;
 
@@ -69,6 +70,7 @@ async function apiRequest(endpoint, method = 'GET', body = null, customHeaders =
 const DEMO_PERSONAS = {
     alice: { username: 'alice', password: 'AlicePassword123!' },
     bob: { username: 'bob', password: 'BobPassword123!' },
+    charlie: { username: 'charlie', password: 'CharliePassword123!' },
     admin: { username: 'admin', password: 'AdminPassword123!' },
     auditor: { username: 'auditor', password: 'AuditorPassword123!' }
 };
@@ -85,9 +87,9 @@ async function loginAs(personaKey) {
         localStorage.setItem('ledgerline_user', JSON.stringify(currentUser));
         
         updateUserUI();
-        showToast(`Switched persona to ${currentUser.username} (${currentUser.role})`, 'success');
+        showToast(`Signed in as ${currentUser.username} (${currentUser.role})`, 'success');
         
-        // Auto navigate to role's relevant tab
+        // Auto navigate to role's most relevant tab
         if (currentUser.role === 'ADMIN') {
             switchTab('admin-tab');
         } else if (currentUser.role === 'AUDITOR') {
@@ -98,8 +100,35 @@ async function loginAs(personaKey) {
 
         refreshCurrentView();
     } catch (err) {
-        showToast(`Login failed: ${err.message}`, 'error');
+        if (err.message === 'ACCOUNT_PENDING_APPROVAL') {
+            showToast(`User '${persona.username}' is PENDING_APPROVAL. Switch to Admin to approve!`, 'warning');
+        } else {
+            showToast(`Login failed: ${err.message}`, 'error');
+        }
     }
+}
+
+function logout() {
+    currentToken = null;
+    currentUser = null;
+    currentAccount = null;
+    userAccounts = [];
+    localStorage.removeItem('ledgerline_token');
+    localStorage.removeItem('ledgerline_user');
+
+    document.getElementById('current-username').textContent = 'Guest (Logged Out)';
+    document.getElementById('current-role-badge').textContent = 'UNAUTHENTICATED';
+    document.getElementById('current-role-badge').className = 'px-2 py-0.5 rounded text-[11px] font-bold uppercase tracking-wide bg-slate-200 text-slate-700';
+    
+    document.querySelectorAll('.persona-btn').forEach(btn => btn.classList.remove('ring-2', 'ring-teal-400', 'bg-slate-700'));
+    
+    document.getElementById('account-number-display').textContent = 'ACC-••••••••';
+    document.getElementById('account-balance-display').textContent = '$0.00';
+    document.getElementById('statement-table-body').innerHTML = `
+        <tr><td colspan="7" class="py-6 text-center text-slate-400">Please sign in to view account statements.</td></tr>
+    `;
+
+    showToast('Logged out successfully.', 'info');
 }
 
 function updateUserUI() {
@@ -145,6 +174,25 @@ function switchTab(tabId) {
         activeBtn.classList.remove('border-transparent', 'text-slate-500');
     }
 
+    // Role Guard Warnings
+    const adminWarning = document.getElementById('admin-role-warning');
+    if (adminWarning) {
+        if (currentUser?.role !== 'ADMIN') {
+            adminWarning.classList.remove('hidden');
+        } else {
+            adminWarning.classList.add('hidden');
+        }
+    }
+
+    const auditorWarning = document.getElementById('auditor-role-warning');
+    if (auditorWarning) {
+        if (currentUser?.role !== 'AUDITOR' && currentUser?.role !== 'ADMIN') {
+            auditorWarning.classList.remove('hidden');
+        } else {
+            auditorWarning.classList.add('hidden');
+        }
+    }
+
     if (tabId === 'holder-tab') loadAccountDashboard();
     if (tabId === 'admin-tab') loadAdminDashboard();
     if (tabId === 'auditor-tab') loadAuditorDashboard();
@@ -158,19 +206,32 @@ function refreshCurrentView() {
 }
 
 // -----------------------------------------------------------------------------
-// Account Holder Dashboard
+// Account Holder Dashboard (FR-9, FR-20)
 // -----------------------------------------------------------------------------
 async function loadAccountDashboard() {
     if (!currentToken) return;
 
     try {
         const { accounts } = await apiRequest('/api/accounts');
-        if (accounts && accounts.length > 0) {
-            currentAccount = accounts[0];
-            document.getElementById('account-number-display').textContent = currentAccount.account_number;
-            document.getElementById('account-balance-display').textContent = `$${(currentAccount.balance / 100).toFixed(2)}`;
+        userAccounts = (accounts || []).filter(a => a.account_type !== 'SYSTEM_CLEARING');
+        
+        const select = document.getElementById('user-accounts-select');
+        if (userAccounts.length > 0) {
+            // Select currentAccount or default to first
+            if (!currentAccount || !userAccounts.some(a => a.id === currentAccount.id)) {
+                currentAccount = userAccounts[0];
+            }
+
+            select.innerHTML = userAccounts.map(a => `
+                <option value="${a.id}" ${a.id === currentAccount.id ? 'selected' : ''}>
+                    ${a.account_number} (${a.account_type} - $${(a.balance / 100).toFixed(2)})
+                </option>
+            `).join('');
+
+            renderActiveAccountCard();
             await loadAccountStatement();
         } else {
+            select.innerHTML = `<option value="">No Active Accounts</option>`;
             document.getElementById('account-number-display').textContent = 'No Account Found';
             document.getElementById('account-balance-display').textContent = '$0.00';
             document.getElementById('statement-table-body').innerHTML = `
@@ -179,6 +240,46 @@ async function loadAccountDashboard() {
         }
     } catch (err) {
         console.error('Failed to load accounts:', err);
+    }
+}
+
+function switchActiveAccount(accountId) {
+    const acc = userAccounts.find(a => a.id === accountId);
+    if (acc) {
+        currentAccount = acc;
+        renderActiveAccountCard();
+        loadAccountStatement();
+        showToast(`Switched active account to ${acc.account_number}`, 'info');
+    }
+}
+
+function renderActiveAccountCard() {
+    if (!currentAccount) return;
+    document.getElementById('account-number-display').textContent = currentAccount.account_number;
+    document.getElementById('account-balance-display').textContent = `$${(currentAccount.balance / 100).toFixed(2)}`;
+    document.getElementById('account-type-badge').textContent = currentAccount.account_type === 'SAVINGS' 
+        ? 'High-Yield Savings' 
+        : 'Primary Checking';
+}
+
+function openNewAccountModal() {
+    document.getElementById('new-account-modal').classList.remove('hidden');
+}
+
+async function handleCreateAccount(e) {
+    e.preventDefault();
+    const accountType = document.getElementById('new-account-type-select').value;
+    try {
+        const { account } = await apiRequest('/api/accounts', 'POST', {
+            accountType,
+            currency: 'USD'
+        });
+        showToast(`New ${account.account_type} account created: ${account.account_number}!`, 'success');
+        closeModals();
+        currentAccount = account;
+        await loadAccountDashboard();
+    } catch (err) {
+        showToast(`Failed to open account: ${err.message}`, 'error');
     }
 }
 
@@ -228,6 +329,28 @@ async function loadAccountStatement() {
     }
 }
 
+function exportStatementCSV() {
+    if (!currentAccount) return;
+    const rows = Array.from(document.querySelectorAll('#statement-table-body tr'));
+    if (rows.length === 0 || rows[0].innerText.includes('No transactions')) {
+        showToast('No statement data to export', 'warning');
+        return;
+    }
+
+    let csv = 'Date & Time,Type,Description,Idempotency Key,Debit,Credit,Running Balance\n';
+    rows.forEach(r => {
+        const cols = Array.from(r.querySelectorAll('td')).map(td => `"${td.innerText.replace(/"/g, '""')}"`);
+        if (cols.length === 7) csv += cols.join(',') + '\n';
+    });
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `statement_${currentAccount.account_number}_${Date.now()}.csv`;
+    link.click();
+    showToast('Statement exported to CSV!', 'success');
+}
+
 // -----------------------------------------------------------------------------
 // Transaction Handlers (Deposit, Withdraw, Transfer)
 // -----------------------------------------------------------------------------
@@ -250,7 +373,7 @@ async function openTransferModal() {
 
     try {
         const { accounts } = await apiRequest('/api/accounts');
-        // Filter out current user's account and clearing vault
+        // Filter out current user's active account and clearing vault
         const otherAccounts = accounts.filter(a => a.id !== currentAccount?.id && a.account_type !== 'SYSTEM_CLEARING');
         if (otherAccounts.length === 0) {
             select.innerHTML = `<option value="">No other customer accounts available</option>`;
@@ -279,7 +402,7 @@ async function handleDeposit(e) {
     const key = generateIdempotencyKey('dep');
 
     try {
-        const res = await apiRequest('/api/transactions/deposit', 'POST', {
+        await apiRequest('/api/transactions/deposit', 'POST', {
             accountId: currentAccount.id,
             amount: amountCents,
             description: desc
@@ -302,7 +425,7 @@ async function handleWithdraw(e) {
     const key = generateIdempotencyKey('wdr');
 
     try {
-        const res = await apiRequest('/api/transactions/withdraw', 'POST', {
+        await apiRequest('/api/transactions/withdraw', 'POST', {
             accountId: currentAccount.id,
             amount: amountCents,
             description: desc
@@ -330,7 +453,7 @@ async function handleTransfer(e) {
     const key = generateIdempotencyKey('trf');
 
     try {
-        const res = await apiRequest('/api/transactions/transfer', 'POST', {
+        await apiRequest('/api/transactions/transfer', 'POST', {
             sourceAccountId: currentAccount.id,
             destinationAccountId: destAccountId,
             amount: amountCents,
@@ -366,11 +489,15 @@ async function loadAdminDashboard() {
 }
 
 async function loadAdminUsers() {
+    if (currentUser?.role !== 'ADMIN') return;
     const tbody = document.getElementById('admin-users-table-body');
+    const statusFilter = document.getElementById('admin-user-filter')?.value || '';
+    const query = statusFilter ? `?status=${statusFilter}` : '';
+
     try {
-        const { users } = await apiRequest('/api/admin/users');
+        const { users } = await apiRequest(`/api/admin/users${query}`);
         if (!users || users.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="6" class="py-6 text-center text-slate-400">No users found.</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="6" class="py-6 text-center text-slate-400">No users found for this filter.</td></tr>`;
             return;
         }
 
@@ -425,6 +552,17 @@ async function deactivateUser(userId) {
     }
 }
 
+async function resetDemoSeedData() {
+    if (!confirm('Are you sure you want to reset all accounts and transactions back to the baseline demo state?')) return;
+    try {
+        await apiRequest('/api/admin/reset-seed', 'POST');
+        showToast('Demo database successfully re-seeded!', 'success');
+        refreshCurrentView();
+    } catch (err) {
+        showToast(`Reset failed: ${err.message}`, 'error');
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Auditor & Double-Entry Ledger Dashboard
 // -----------------------------------------------------------------------------
@@ -461,6 +599,7 @@ async function verifyLedgerConservation() {
 }
 
 async function loadLedgerEntries() {
+    if (currentUser?.role !== 'AUDITOR' && currentUser?.role !== 'ADMIN') return;
     const tbody = document.getElementById('ledger-entries-table-body');
     try {
         const { entries } = await apiRequest('/api/ledger/entries?limit=50');
@@ -490,11 +629,15 @@ async function loadLedgerEntries() {
 }
 
 async function loadAuditLogs() {
+    if (currentUser?.role !== 'AUDITOR' && currentUser?.role !== 'ADMIN') return;
     const tbody = document.getElementById('audit-logs-table-body');
+    const statusFilter = document.getElementById('audit-status-filter')?.value || '';
+    const query = statusFilter ? `?status=${statusFilter}&limit=50` : '?limit=50';
+
     try {
-        const { logs } = await apiRequest('/api/audit/logs?limit=50');
+        const { logs } = await apiRequest(`/api/audit/logs${query}`);
         if (!logs || logs.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="7" class="py-6 text-center text-slate-400">No audit logs recorded yet.</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="7" class="py-6 text-center text-slate-400">No audit logs matching this filter.</td></tr>`;
             return;
         }
 
@@ -627,7 +770,11 @@ async function handleAuthSubmit(e) {
             showToast(`Welcome back, ${currentUser.username}!`, 'success');
             refreshCurrentView();
         } catch (err) {
-            showToast(`Login failed: ${err.message}`, 'error');
+            if (err.message === 'ACCOUNT_PENDING_APPROVAL') {
+                showToast('Your account is pending administrator review and activation.', 'warning');
+            } else {
+                showToast(`Login failed: ${err.message}`, 'error');
+            }
         }
     }
 }
@@ -639,4 +786,3 @@ window.addEventListener('DOMContentLoaded', async () => {
     // Default start as Alice
     await loginAs('alice');
 });
-
