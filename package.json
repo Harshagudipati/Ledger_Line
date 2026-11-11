@@ -1,0 +1,27 @@
+{
+  "name": "ledgerline",
+  "version": "1.0.0",
+  "description": "LedgerLine / BalanceVault: Provably Correct Double-Entry Ledger and Account Management System",
+  "main": "backend/src/server.js",
+  "scripts": {
+    "start": "node backend/src/server.js",
+    "seed": "node backend/src/db/seed.js",
+    "test": "node backend/tests/runTests.js",
+    "test:concurrency": "node backend/tests/concurrency.test.js",
+    "test:idempotency": "node backend/tests/idempotency.test.js",
+    "test:ledger": "node backend/tests/ledger.test.js",
+    "test:security": "node backend/tests/security.test.js",
+    "test:audit": "node backend/tests/audit.test.js"
+  },
+  "keywords": [
+    "double-entry",
+    "ledger",
+    "accounting",
+    "concurrency",
+    "idempotency",
+    "audit-trail",
+    "rbac"
+  ],
+  "author": "Harshagudipati",
+  "license": "MIT"
+}
