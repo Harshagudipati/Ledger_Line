@@ -14,7 +14,7 @@ async function testSecurity() {
     console.log('======================================================');
 
     const db = getDatabase(':memory:');
-    const { admin, auditor, alice, bob, charlie } = seedDatabase(':memory:');
+    const { admin, auditor, alice, bob, charlie } = seedDatabase(db);
     
     const auditService = new AuditService(db);
     const authService = new AuthService(db);

@@ -6,8 +6,12 @@ const config = require('../config');
 
 let dbInstance = null;
 
-function getDatabase(dbPath = config.DB_PATH) {
-    if (dbInstance) return dbInstance;
+function getDatabase(dbPath = config.DB_PATH, forceNew = false) {
+    // For file-based DB, reuse instance unless forceNew is true.
+    // For in-memory DB (used in tests), always return a fresh, clean, isolated database.
+    if (dbInstance && !forceNew && dbPath !== ':memory:') {
+        return dbInstance;
+    }
 
     // Ensure directory exists if not in-memory
     if (dbPath !== ':memory:') {
@@ -29,7 +33,9 @@ function getDatabase(dbPath = config.DB_PATH) {
         db.exec(schema);
     }
 
-    dbInstance = db;
+    if (dbPath !== ':memory:') {
+        dbInstance = db;
+    }
     return db;
 }
 
@@ -68,4 +74,3 @@ module.exports = {
     withTransaction,
     resetDatabaseInstance
 };
-

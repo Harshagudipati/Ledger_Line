@@ -13,7 +13,7 @@ async function testConcurrency() {
 
     // Setup fresh isolated in-memory DB
     const db = getDatabase(':memory:');
-    const { alice } = seedDatabase(':memory:');
+    const { alice } = seedDatabase(db);
     
     const auditService = new AuditService(db);
     const accountService = new AccountService(db);

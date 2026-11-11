@@ -6,8 +6,8 @@ const { LedgerService } = require('../services/ledgerService');
 const { AuditService } = require('../services/auditService');
 const config = require('../config');
 
-function seedDatabase(dbPath = config.DB_PATH) {
-    const db = getDatabase(dbPath);
+function seedDatabase(dbOrPath = config.DB_PATH) {
+    const db = (typeof dbOrPath === 'object' && dbOrPath !== null) ? dbOrPath : getDatabase(dbOrPath);
     const auditService = new AuditService(db);
     const authService = new AuthService(db);
     const accountService = new AccountService(db);
@@ -140,4 +140,3 @@ if (require.main === module) {
 }
 
 module.exports = { seedDatabase };
-

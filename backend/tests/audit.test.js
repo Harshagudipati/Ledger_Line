@@ -10,7 +10,7 @@ async function testAudit() {
     console.log('======================================================');
 
     const db = getDatabase(':memory:');
-    seedDatabase(':memory:');
+    seedDatabase(db);
     const auditService = new AuditService(db);
 
     console.log('1. Recording audit event...');

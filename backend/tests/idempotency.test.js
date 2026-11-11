@@ -12,7 +12,7 @@ async function testIdempotency() {
     console.log('======================================================');
 
     const db = getDatabase(':memory:');
-    const { alice, bob } = seedDatabase(':memory:');
+    const { alice, bob } = seedDatabase(db);
     
     const auditService = new AuditService(db);
     const accountService = new AccountService(db);
