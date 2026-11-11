@@ -46,3 +46,4 @@ module.exports = {
     authenticate,
     requireRole
 };
+

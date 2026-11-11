@@ -145,3 +145,4 @@ END;
 | `/api/ledger/entries` | Yes | No (403) | Yes (Read-Only) |
 | `/api/audit/logs` | Yes | No (403) | Yes (Read-Only) |
 | `/api/admin/*` | Yes | No (403) | No (403) |
+

@@ -82,3 +82,4 @@ Open your browser at: **[http://localhost:8080](http://localhost:8080)**
 - **Health Check**: `GET http://localhost:8080/api/health`
 - **Readiness Check**: `GET http://localhost:8080/api/ready`
 - **System Conservation**: `GET http://localhost:8080/api/ledger/conservation` (Requires Bearer token)
+

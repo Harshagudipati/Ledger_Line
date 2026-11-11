@@ -639,3 +639,4 @@ window.addEventListener('DOMContentLoaded', async () => {
     // Default start as Alice
     await loginAs('alice');
 });
+

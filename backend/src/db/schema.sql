@@ -106,3 +106,4 @@ CREATE INDEX IF NOT EXISTS idx_ledger_tx ON ledger_entries(transaction_id);
 CREATE INDEX IF NOT EXISTS idx_ledger_account ON ledger_entries(account_id);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_keys(expires_at);
+
