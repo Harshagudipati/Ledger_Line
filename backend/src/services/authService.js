@@ -54,13 +54,46 @@ function verifyToken(token) {
         throw new Error('INVALID_TOKEN_SIGNATURE');
     }
 
-    const payload = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8'));
+    let header;
+    let payload;
+    try {
+        header = JSON.parse(Buffer.from(encodedHeader, 'base64url').toString('utf8'));
+        payload = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8'));
+    } catch {
+        throw new Error('INVALID_TOKEN_FORMAT');
+    }
+
+    if (!header || header.alg !== 'HS256' || header.typ !== 'JWT') {
+        throw new Error('INVALID_TOKEN_FORMAT');
+    }
+    if (!payload || typeof payload !== 'object' || !payload.userId || !payload.role) {
+        throw new Error('INVALID_TOKEN_FORMAT');
+    }
+
     const now = Math.floor(Date.now() / 1000);
     if (payload.exp && payload.exp < now) {
         throw new Error('TOKEN_EXPIRED');
     }
 
     return payload;
+}
+
+function validateUserInput({ username, email, password }) {
+    const cleanUsername = typeof username === 'string' ? username.trim() : '';
+    const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    if (!cleanUsername || !cleanEmail || !password) {
+        throw new Error('MISSING_FIELDS');
+    }
+    if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(cleanUsername)) {
+        throw new Error('INVALID_USERNAME');
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+        throw new Error('INVALID_EMAIL');
+    }
+    if (typeof password !== 'string' || password.length < 8) {
+        throw new Error('PASSWORD_TOO_SHORT');
+    }
+    return { username: cleanUsername, email: cleanEmail, password };
 }
 
 class AuthService {
@@ -73,37 +106,32 @@ class AuthService {
      * New holders are placed in PENDING_APPROVAL until an Admin activates them.
      */
     async register({ username, email, password, role = 'ACCOUNT_HOLDER' }) {
-        if (!username || !email || !password) {
-            throw new Error('MISSING_FIELDS');
-        }
-        if (String(password).length < 8) {
-            throw new Error('PASSWORD_TOO_SHORT');
-        }
         if (role !== 'ACCOUNT_HOLDER') {
             throw new Error('FORBIDDEN_SELF_REGISTRATION_ROLE');
         }
+        const validated = validateUserInput({ username, email, password });
 
         const existing = await this.db.get(
-            'SELECT id FROM users WHERE username = ? OR email = ?',
-            username,
-            email
+            'SELECT id FROM users WHERE LOWER(username) = LOWER(?) OR LOWER(email) = LOWER(?)',
+            validated.username,
+            validated.email
         );
         if (existing) {
             throw new Error('USER_ALREADY_EXISTS');
         }
 
         const id = 'usr_' + crypto.randomUUID();
-        const { hash, salt } = hashPassword(password);
+        const { hash, salt } = hashPassword(validated.password);
 
         await this.db.run(`
             INSERT INTO users (id, username, email, password_hash, password_salt, role, status)
             VALUES (?, ?, ?, ?, ?, ?, 'PENDING_APPROVAL')
-        `, id, username, email, hash, salt, 'ACCOUNT_HOLDER');
+        `, id, validated.username, validated.email, hash, salt, 'ACCOUNT_HOLDER');
 
         return {
             id,
-            username,
-            email,
+            username: validated.username,
+            email: validated.email,
             role: 'ACCOUNT_HOLDER',
             status: 'PENDING_APPROVAL'
         };
@@ -114,36 +142,42 @@ class AuthService {
      * Succeeds ONLY if no non-system ADMIN user exists in the database.
      */
     async bootstrapAdmin({ username, email, password }) {
-        if (!username || !email || !password) {
-            throw new Error('MISSING_FIELDS');
-        }
-        if (String(password).length < 8) {
-            throw new Error('PASSWORD_TOO_SHORT');
-        }
+        const validated = validateUserInput({ username, email, password });
 
-        const existingAdmin = await this.db.get(
-            "SELECT COUNT(*) as count FROM users WHERE role = 'ADMIN' AND id != ?",
-            config.SYSTEM_USER_ID
-        );
-        if (Number(existingAdmin.count) > 0) {
-            throw new Error('ADMIN_ALREADY_BOOTSTRAPPED');
-        }
+        return this.db.withTransaction(async (txDb) => {
+            const existingAdmin = await txDb.get(
+                "SELECT COUNT(*) as count FROM users WHERE role = 'ADMIN' AND id != ?",
+                config.SYSTEM_USER_ID
+            );
+            if (Number(existingAdmin.count) > 0) {
+                throw new Error('ADMIN_ALREADY_BOOTSTRAPPED');
+            }
 
-        const id = 'usr_' + crypto.randomUUID();
-        const { hash, salt } = hashPassword(password);
+            const existingUser = await txDb.get(
+                'SELECT id FROM users WHERE LOWER(username) = LOWER(?) OR LOWER(email) = LOWER(?)',
+                validated.username,
+                validated.email
+            );
+            if (existingUser) {
+                throw new Error('USER_ALREADY_EXISTS');
+            }
 
-        await this.db.run(`
-            INSERT INTO users (id, username, email, password_hash, password_salt, role, status)
-            VALUES (?, ?, ?, ?, ?, 'ADMIN', 'ACTIVE')
-        `, id, username, email, hash, salt);
+            const id = 'usr_' + crypto.randomUUID();
+            const { hash, salt } = hashPassword(validated.password);
 
-        return {
-            id,
-            username,
-            email,
-            role: 'ADMIN',
-            status: 'ACTIVE'
-        };
+            await txDb.run(`
+                INSERT INTO users (id, username, email, password_hash, password_salt, role, status)
+                VALUES (?, ?, ?, ?, ?, 'ADMIN', 'ACTIVE')
+            `, id, validated.username, validated.email, hash, salt);
+
+            return {
+                id,
+                username: validated.username,
+                email: validated.email,
+                role: 'ADMIN',
+                status: 'ACTIVE'
+            };
+        });
     }
 
     /**
@@ -300,5 +334,6 @@ module.exports = {
     hashPassword,
     verifyPassword,
     generateToken,
-    verifyToken
+    verifyToken,
+    validateUserInput
 };

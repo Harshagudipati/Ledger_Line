@@ -1,7 +1,7 @@
 // backend/src/services/adminService.js
 const crypto = require('node:crypto');
 const config = require('../config');
-const { hashPassword } = require('./authService');
+const { hashPassword, validateUserInput } = require('./authService');
 
 class AdminService {
     constructor(db, auditService, accountService) {
@@ -32,33 +32,28 @@ class AdminService {
     }
 
     async createUser({ username, email, password, role = 'ACCOUNT_HOLDER' }, adminUser) {
-        if (!username || !email || !password) {
-            throw new Error('MISSING_FIELDS');
-        }
-        if (String(password).length < 8) {
-            throw new Error('PASSWORD_TOO_SHORT');
-        }
+        const validated = validateUserInput({ username, email, password });
         const validRoles = ['ADMIN', 'ACCOUNT_HOLDER', 'AUDITOR'];
         if (!validRoles.includes(role)) {
             throw new Error('INVALID_ROLE');
         }
 
         const existing = await this.db.get(
-            'SELECT id FROM users WHERE username = ? OR email = ?',
-            username,
-            email
+            'SELECT id FROM users WHERE LOWER(username) = LOWER(?) OR LOWER(email) = LOWER(?)',
+            validated.username,
+            validated.email
         );
         if (existing) {
             throw new Error('USER_ALREADY_EXISTS');
         }
 
         const userId = 'usr_' + crypto.randomUUID();
-        const { hash, salt } = hashPassword(password);
+        const { hash, salt } = hashPassword(validated.password);
 
         await this.db.run(`
             INSERT INTO users (id, username, email, password_hash, password_salt, role, status)
             VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')
-        `, userId, username, email, hash, salt, role);
+        `, userId, validated.username, validated.email, hash, salt, role);
 
         let initialAccount = null;
         if (role === 'ACCOUNT_HOLDER' && this.accountService) {
@@ -77,15 +72,15 @@ class AdminService {
                 action: 'ADMIN_CREATED_USER',
                 entityType: 'USER',
                 entityId: userId,
-                details: { username, email, role, initialAccountId: initialAccount?.id || null },
+                details: { username: validated.username, email: validated.email, role, initialAccountId: initialAccount?.id || null },
                 status: 'SUCCESS'
             });
         }
 
         return {
             id: userId,
-            username,
-            email,
+            username: validated.username,
+            email: validated.email,
             role,
             status: 'ACTIVE',
             initialAccount
@@ -188,6 +183,7 @@ class AdminService {
         const accountStats = await this.db.get(`
             SELECT
                 COUNT(*) as total_accounts,
+                COALESCE(SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END), 0) as active_accounts,
                 COALESCE(SUM(balance), 0) as total_balances
             FROM accounts
             WHERE account_type != 'SYSTEM_CLEARING'
@@ -213,6 +209,7 @@ class AdminService {
             },
             accounts: {
                 total_accounts: Number(accountStats.total_accounts || 0),
+                active_accounts: Number(accountStats.active_accounts || 0),
                 total_balances: Number(accountStats.total_balances || 0)
             },
             transactions: {

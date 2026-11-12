@@ -299,7 +299,7 @@ export default function HolderDashboard({ user, notify }) {
             )}
           </div>
           <div className="text-xs text-slate-500 mt-1">
-            Entries: {conservation?.ledger_stats?.entry_count ?? '—'}
+            Entries: {conservation?.ledger_stats?.total_entries ?? '—'}
           </div>
         </div>
       </div>

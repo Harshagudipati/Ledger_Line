@@ -14,7 +14,11 @@ class TelemetryCollector {
     }
 
     beginRequest(req, res) {
-        const requestId = req.headers['x-request-id'] || crypto.randomUUID();
+        const rawReqId = req.headers['x-request-id'];
+        const cleanReqId = typeof rawReqId === 'string'
+            ? rawReqId.replace(/[\r\n\x00-\x1f\x7f]/g, '').slice(0, 64).trim()
+            : '';
+        const requestId = cleanReqId || crypto.randomUUID();
         const startNs = process.hrtime.bigint();
         res.setHeader('X-Request-Id', requestId);
 

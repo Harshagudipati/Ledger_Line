@@ -13,13 +13,24 @@ class AccountService {
         return `ACC-${randomNum}`;
     }
 
-    async createAccount({ ownerId, accountType = 'CHECKING', currency = 'USD' }) {
+    async createAccount({ ownerId, accountType = 'CHECKING', currency = 'USD', allowSystemClearing = false }) {
         if (!ownerId) {
             throw new Error('OWNER_ID_REQUIRED');
         }
-        const validTypes = ['CHECKING', 'SAVINGS', 'SYSTEM_CLEARING'];
+        const validTypes = allowSystemClearing ? ['CHECKING', 'SAVINGS', 'SYSTEM_CLEARING'] : ['CHECKING', 'SAVINGS'];
         if (!validTypes.includes(accountType)) {
             throw new Error('INVALID_ACCOUNT_TYPE');
+        }
+        const normalizedCurrency = String(currency || 'USD').trim().toUpperCase();
+        if (!['USD'].includes(normalizedCurrency)) {
+            throw new Error('INVALID_CURRENCY');
+        }
+        const owner = await this.db.get('SELECT id, status FROM users WHERE id = ?', ownerId);
+        if (!owner) {
+            throw new Error('USER_NOT_FOUND');
+        }
+        if (owner.status !== 'ACTIVE' && accountType !== 'SYSTEM_CLEARING') {
+            throw new Error('USER_NOT_ACTIVE');
         }
 
         const id = accountType === 'SYSTEM_CLEARING'
@@ -32,7 +43,7 @@ class AccountService {
         await this.db.run(`
             INSERT INTO accounts (id, account_number, owner_id, account_type, currency, balance, status)
             VALUES (?, ?, ?, ?, ?, 0, 'ACTIVE')
-        `, id, accountNumber, ownerId, accountType, currency);
+        `, id, accountNumber, ownerId, accountType, normalizedCurrency);
 
         const account = await this.getAccountById(id);
 
@@ -159,6 +170,9 @@ class AccountService {
         }
 
         return this.db.withTransaction(async (txDb) => {
+            // Lock source account immediately so concurrent PG transactions cannot alter balance before closure
+            await txDb.lockAccountsForUpdate([accountId]);
+
             const target = await txDb.get('SELECT * FROM accounts WHERE id = ?', accountId);
             if (!target) {
                 throw new Error('ACCOUNT_NOT_FOUND');
@@ -203,7 +217,16 @@ class AccountService {
                 await txDb.lockAccountsForUpdate([target.id, dest.id]);
 
                 const lockedSource = await txDb.get('SELECT balance, status FROM accounts WHERE id = ?', target.id);
+                const lockedDest = await txDb.get('SELECT balance, status FROM accounts WHERE id = ?', dest.id);
+                if (!lockedDest || lockedDest.status !== 'ACTIVE') {
+                    throw new Error('ACCOUNT_NOT_ACTIVE');
+                }
+
                 const sweepAmount = Number(lockedSource.balance);
+                const destBal = Number(lockedDest.balance);
+                if (!Number.isSafeInteger(destBal + sweepAmount) || destBal + sweepAmount > 1_000_000_000_000_00) {
+                    throw new Error('BALANCE_LIMIT_EXCEEDED');
+                }
                 if (sweepAmount > 0) {
                     sweepTransactionId = 'tx_' + crypto.randomUUID();
                     const idemKey = `close-sweep-${target.id}-${crypto.randomUUID()}`;

@@ -15,7 +15,11 @@ const { RateLimiter } = require('./middleware/rateLimiter');
 const { TelemetryCollector } = require('./middleware/telemetry');
 
 function escapeCsvCell(val) {
-    const s = val === null || val === undefined ? '' : String(val);
+    let s = val === null || val === undefined ? '' : String(val);
+    // Neutralize spreadsheet formula injection (=, +, -, @, tab, CR)
+    if (/^[=+\-@\t\r]/.test(s)) {
+        s = `'${s}`;
+    }
     return `"${s.replace(/"/g, '""')}"`;
 }
 
@@ -46,7 +50,11 @@ function createServer(dbInstance = null, options = {}) {
     });
 
     function getClientIp(req) {
-        return req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '127.0.0.1';
+        if (config.TRUST_PROXY && req.headers['x-forwarded-for']) {
+            const first = String(req.headers['x-forwarded-for']).split(',')[0].trim();
+            if (first) return first;
+        }
+        return req.socket?.remoteAddress || '127.0.0.1';
     }
 
     function sendJson(res, statusCode, data) {
@@ -119,9 +127,15 @@ function createServer(dbInstance = null, options = {}) {
 
         telemetry.beginRequest(req, res);
 
-        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Origin', config.CORS_ORIGIN);
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, X-Request-Id');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.setHeader('X-Frame-Options', 'DENY');
+        res.setHeader('Referrer-Policy', 'no-referrer');
+        if ((req.url || '/').startsWith('/api/')) {
+            res.setHeader('Cache-Control', 'no-store');
+        }
 
         if (req.method === 'OPTIONS') {
             res.writeHead(204);
@@ -646,6 +660,9 @@ function createServer(dbInstance = null, options = {}) {
             // 8. Static Frontend Hosting (React dist build or fallback frontend)
             // ----------------------------------------------------------------
             if (!pathname.startsWith('/api/')) {
+                if (pathname.split('/').some(seg => seg.startsWith('.') && seg.length > 1)) {
+                    return sendJson(res, 403, { error: 'FORBIDDEN_PATH', message: 'Hidden files are not accessible' });
+                }
                 const staticRoot = getStaticRoot();
                 const cleanPath = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
                 let filePath = path.resolve(staticRoot, cleanPath);
@@ -699,10 +716,13 @@ function createServer(dbInstance = null, options = {}) {
                 'INVALID_JSON': 400,
                 'PAYLOAD_TOO_LARGE': 413,
                 'MISSING_FIELDS': 400,
+                'INVALID_USERNAME': 400,
+                'INVALID_EMAIL': 400,
                 'PASSWORD_TOO_SHORT': 400,
                 'MISSING_CREDENTIALS': 400,
                 'INVALID_ROLE': 400,
                 'INVALID_ACCOUNT_TYPE': 400,
+                'INVALID_CURRENCY': 400,
                 'INVALID_ACCOUNT_STATUS': 400,
                 'INVALID_AMOUNT_MUST_BE_POSITIVE_INTEGER_CENTS': 400,
                 'AMOUNT_EXCEEDS_SINGLE_TX_LIMIT': 400,

@@ -39,7 +39,7 @@ function executeRedisCommands(redisUrl, commands, timeoutMs = 500) {
             .join('');
 
         const socket = useTls
-            ? tls.connect({ host, port, rejectUnauthorized: process.env.NODE_ENV === 'production' })
+            ? tls.connect({ host, port, rejectUnauthorized: process.env.REDIS_TLS_REJECT_UNAUTHORIZED !== 'false' })
             : net.createConnection({ host, port });
 
         let raw = '';
@@ -62,9 +62,13 @@ function executeRedisCommands(redisUrl, commands, timeoutMs = 500) {
 
         socket.on('data', chunk => {
             raw += chunk.toString('utf8');
-            const parsedReplies = tryParseRespReplies(raw, fullPipeline.length);
-            if (parsedReplies) {
-                finish(null, parsedReplies.slice(userCmdOffset));
+            try {
+                const parsedReplies = tryParseRespReplies(raw, fullPipeline.length);
+                if (parsedReplies) {
+                    finish(null, parsedReplies.slice(userCmdOffset));
+                }
+            } catch (parseErr) {
+                finish(parseErr);
             }
         });
     });
@@ -81,8 +85,9 @@ function tryParseRespReplies(buffer, expectedCount) {
         const prefix = buffer[pos];
         const line = buffer.slice(pos + 1, lineEnd);
 
-        if (prefix === '+' || prefix === '-' || prefix === ':') {
-            if (prefix === '-') return null; // Will trigger caller error handling if needed
+        if (prefix === '-') {
+            throw new Error(`REDIS_ERROR: ${line}`);
+        } else if (prefix === '+' || prefix === ':') {
             replies.push(prefix === ':' ? parseInt(line, 10) : line);
             pos = lineEnd + 2;
         } else if (prefix === '$') {
@@ -145,6 +150,14 @@ class RateLimiter {
         let record = this.store.get(key);
 
         if (!record || now > record.resetTime) {
+            // Prevent unbounded memory growth under key-spray DoS
+            if (!record && this.store.size >= 10000) {
+                this.cleanup();
+                if (this.store.size >= 10000) {
+                    const oldestKey = this.store.keys().next().value;
+                    if (oldestKey !== undefined) this.store.delete(oldestKey);
+                }
+            }
             record = {
                 count: 1,
                 resetTime: now + this.windowMs

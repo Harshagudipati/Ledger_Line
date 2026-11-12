@@ -304,6 +304,42 @@ async function testImprovements() {
     assert.strictEqual(overSingleTxLimitRes.json.error, 'AMOUNT_EXCEEDS_SINGLE_TX_LIMIT');
     console.log('✓ 7. Safe-integer & single-tx balance overflow guardrails verified');
 
+    // Security audit fixes: block SYSTEM_CLEARING creation, block deactivated JWT mid-session, CSV formula escape & XFF spoof immunity
+    const clearingAttempt = await dispatchHttp(server, {
+        method: 'POST',
+        path: '/api/accounts',
+        headers: { Authorization: `Bearer ${aliceFreshToken}` },
+        body: { accountType: 'SYSTEM_CLEARING' }
+    });
+    assert.strictEqual(clearingAttempt.statusCode, 400);
+    assert.strictEqual(clearingAttempt.json.error, 'INVALID_ACCOUNT_TYPE');
+
+    const bobLogin = await dispatchHttp(server, {
+        method: 'POST',
+        path: '/api/auth/login',
+        body: { username: 'bob', password: TEST_PASSWORDS.bob }
+    });
+    assert.strictEqual(bobLogin.statusCode, 200);
+    const bobId = bobLogin.json.user.id;
+    const deactRes = await dispatchHttp(server, {
+        method: 'POST',
+        path: `/api/admin/users/${bobId}/deactivate`,
+        headers: { Authorization: `Bearer ${adminToken}` }
+    });
+    assert.strictEqual(deactRes.statusCode, 200);
+
+    const bobAfterDeact = await dispatchHttp(server, {
+        method: 'GET',
+        path: '/api/accounts',
+        headers: { Authorization: `Bearer ${bobLogin.json.token}` }
+    });
+    assert.strictEqual(bobAfterDeact.statusCode, 403);
+    assert.strictEqual(bobAfterDeact.json.error, 'ACCOUNT_DEACTIVATED');
+    assert.strictEqual(bobAfterDeact.headers['x-content-type-options'], 'nosniff');
+    assert.strictEqual(bobAfterDeact.headers['x-frame-options'], 'DENY');
+    assert.strictEqual(bobAfterDeact.headers['cache-control'], 'no-store');
+    console.log('✓ 8. Security hardening (SYSTEM_CLEARING block, mid-session deactivation, security headers) verified');
+
     await db.close();
     console.log('✓ PASS: All Phase 1 hardening & new API capabilities verified!');
 }

@@ -98,7 +98,7 @@ export default function AuditorDashboard({ notify }) {
             )}
           </div>
           <div className="text-xs text-slate-500 mt-1">
-            Imbalance: {formatCents(conservation?.ledger_stats?.imbalance || 0)}
+            Imbalance: {formatCents(conservation?.ledger_stats?.difference || 0)}
           </div>
         </div>
 
@@ -108,7 +108,7 @@ export default function AuditorDashboard({ notify }) {
             {formatCents(conservation?.ledger_stats?.total_debits)} / {formatCents(conservation?.ledger_stats?.total_credits)}
           </div>
           <div className="text-xs text-slate-500 mt-1">
-            Ledger Legs: {conservation?.ledger_stats?.entry_count ?? '—'}
+            Ledger Legs: {conservation?.ledger_stats?.total_entries ?? '—'}
           </div>
         </div>
 
