@@ -23,6 +23,10 @@ class RateLimiter {
         }
     }
 
+    reset() {
+        this.hits.clear();
+    }
+
     check(req, res) {
         const ip = req.socket?.remoteAddress || req.headers['x-forwarded-for'] || '127.0.0.1';
         const now = Date.now();
@@ -31,10 +35,12 @@ class RateLimiter {
         timestamps = timestamps.filter(t => now - t < this.windowMs);
 
         if (timestamps.length >= this.max) {
-            const retryAfter = Math.ceil((this.windowMs - (now - timestamps[0])) / 1000);
+            const retryAfter = Math.max(1, Math.ceil((this.windowMs - (now - timestamps[0])) / 1000));
             res.writeHead(429, {
                 'Content-Type': 'application/json',
-                'Retry-After': String(retryAfter)
+                'Retry-After': String(retryAfter),
+                'X-RateLimit-Limit': String(this.max),
+                'X-RateLimit-Remaining': '0'
             });
             res.end(JSON.stringify({
                 error: 'RATE_LIMIT_EXCEEDED',
@@ -45,6 +51,8 @@ class RateLimiter {
 
         timestamps.push(now);
         this.hits.set(ip, timestamps);
+        res.setHeader('X-RateLimit-Limit', String(this.max));
+        res.setHeader('X-RateLimit-Remaining', String(Math.max(0, this.max - timestamps.length)));
         return true;
     }
 }
@@ -55,4 +63,3 @@ module.exports = {
     RateLimiter,
     defaultLimiter
 };
-

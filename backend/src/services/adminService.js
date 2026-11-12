@@ -1,4 +1,7 @@
 // backend/src/services/adminService.js
+const crypto = require('node:crypto');
+const config = require('../config');
+const { hashPassword } = require('./authService');
 
 class AdminService {
     constructor(db, auditService, accountService) {
@@ -8,15 +11,15 @@ class AdminService {
     }
 
     /**
-     * FR-8: List all users with filtering.
+     * FR-8: List all platform users with filtering (excludes internal system root user).
      */
     listUsers({ status = null, role = null } = {}) {
         let query = `
             SELECT id, username, email, role, status, created_at, updated_at
             FROM users
-            WHERE 1=1
+            WHERE id != ?
         `;
-        const params = [];
+        const params = [config.SYSTEM_USER_ID];
 
         if (status) {
             query += ' AND status = ?';
@@ -27,8 +30,68 @@ class AdminService {
             params.push(role);
         }
 
-        query += ' ORDER BY created_at DESC';
+        query += ' ORDER BY created_at DESC, rowid DESC';
         return this.db.prepare(query).all(...params);
+    }
+
+    /**
+     * FR-8: Admin directly creates an active user (Account Holder, Auditor, or Admin).
+     */
+    createUser({ username, email, password, role = 'ACCOUNT_HOLDER' }, adminUser) {
+        if (!username || !email || !password) {
+            throw new Error('MISSING_FIELDS');
+        }
+        if (typeof password !== 'string' || password.length < 8) {
+            throw new Error('PASSWORD_TOO_SHORT');
+        }
+        const validRoles = ['ACCOUNT_HOLDER', 'AUDITOR', 'ADMIN'];
+        if (!validRoles.includes(role)) {
+            throw new Error('INVALID_ROLE');
+        }
+
+        const existing = this.db.prepare('SELECT id FROM users WHERE username = ? OR email = ?').get(username, email);
+        if (existing) {
+            throw new Error('USER_ALREADY_EXISTS');
+        }
+
+        const userId = 'usr_' + crypto.randomUUID();
+        const { hash, salt } = hashPassword(password);
+
+        this.db.prepare(`
+            INSERT INTO users (id, username, email, password_hash, password_salt, role, status)
+            VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')
+        `).run(userId, username, email, hash, salt, role);
+
+        let initialAccount = null;
+        if (role === 'ACCOUNT_HOLDER') {
+            initialAccount = this.accountService.createAccount({
+                ownerId: userId,
+                accountType: 'CHECKING',
+                currency: 'USD'
+            });
+        }
+
+        if (this.auditService && adminUser) {
+            this.auditService.record({
+                actorId: adminUser.userId,
+                actorUsername: adminUser.username,
+                actorRole: adminUser.role,
+                action: 'USER_CREATED_BY_ADMIN',
+                entityType: 'USER',
+                entityId: userId,
+                details: { username, email, role, initialAccountId: initialAccount?.id || null },
+                status: 'SUCCESS'
+            });
+        }
+
+        return {
+            id: userId,
+            username,
+            email,
+            role,
+            status: 'ACTIVE',
+            initialAccount
+        };
     }
 
     /**
@@ -92,6 +155,9 @@ class AdminService {
         if (user.id === adminUser.userId) {
             throw new Error('CANNOT_DEACTIVATE_OWN_ADMIN_ACCOUNT');
         }
+        if (user.id === config.SYSTEM_USER_ID) {
+            throw new Error('CANNOT_DEACTIVATE_SYSTEM_ROOT');
+        }
 
         this.db.prepare(`
             UPDATE users
@@ -129,12 +195,13 @@ class AdminService {
                 SUM(CASE WHEN status = 'PENDING_APPROVAL' THEN 1 ELSE 0 END) as pending_users,
                 SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) as active_users
             FROM users
-        `).get();
+            WHERE id != ?
+        `).get(config.SYSTEM_USER_ID);
 
         const accountStats = this.db.prepare(`
             SELECT 
                 COUNT(*) as total_accounts,
-                SUM(balance) as total_balances
+                COALESCE(SUM(balance), 0) as total_balances
             FROM accounts
             WHERE account_type != 'SYSTEM_CLEARING'
         `).get();
@@ -142,7 +209,7 @@ class AdminService {
         const txStats = this.db.prepare(`
             SELECT 
                 COUNT(*) as total_transactions,
-                SUM(amount) as total_volume
+                COALESCE(SUM(amount), 0) as total_volume
             FROM transactions
             WHERE status = 'COMPLETED'
         `).get();
@@ -161,4 +228,3 @@ class AdminService {
 }
 
 module.exports = { AdminService };
-

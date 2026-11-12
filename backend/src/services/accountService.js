@@ -1,11 +1,11 @@
 // backend/src/services/accountService.js
 const crypto = require('node:crypto');
-const { withTransaction } = require('../db/database');
 const config = require('../config');
 
 class AccountService {
-    constructor(db) {
+    constructor(db, auditService = null) {
         this.db = db;
+        this.auditService = auditService;
     }
 
     /**
@@ -89,7 +89,7 @@ class AccountService {
                        u.username as owner_username, u.email as owner_email
                 FROM accounts a
                 JOIN users u ON a.owner_id = u.id
-                ORDER BY a.created_at DESC
+                ORDER BY a.created_at DESC, a.rowid DESC
             `).all();
         }
 
@@ -101,8 +101,72 @@ class AccountService {
             FROM accounts a
             JOIN users u ON a.owner_id = u.id
             WHERE a.owner_id = ?
-            ORDER BY a.created_at DESC
+            ORDER BY a.created_at DESC, a.rowid DESC
         `).all(user.userId);
+    }
+
+    /**
+     * List active customer accounts as safe transfer recipients.
+     * Deliberately excludes balances, emails, and SYSTEM_CLEARING to preserve privacy (FR-3).
+     */
+    listTransferRecipients(excludeAccountId = null) {
+        let query = `
+            SELECT a.id, a.account_number, a.account_type, a.currency, u.username as owner_username
+            FROM accounts a
+            JOIN users u ON a.owner_id = u.id
+            WHERE a.account_type != 'SYSTEM_CLEARING'
+              AND a.status = 'ACTIVE'
+              AND u.status = 'ACTIVE'
+        `;
+        const params = [];
+        if (excludeAccountId) {
+            query += ' AND a.id != ?';
+            params.push(excludeAccountId);
+        }
+        query += ' ORDER BY u.username ASC, a.created_at ASC';
+        return this.db.prepare(query).all(...params);
+    }
+
+    /**
+     * FR-9: Admin account status management (ACTIVE, FROZEN, CLOSED).
+     */
+    updateAccountStatus(accountId, newStatus, adminUser) {
+        const validStatuses = ['ACTIVE', 'FROZEN', 'CLOSED'];
+        if (!validStatuses.includes(newStatus)) {
+            throw new Error('INVALID_ACCOUNT_STATUS');
+        }
+
+        const account = this.getAccountById(accountId);
+        if (!account) {
+            throw new Error('ACCOUNT_NOT_FOUND');
+        }
+        if (account.account_type === 'SYSTEM_CLEARING') {
+            throw new Error('CANNOT_MODIFY_SYSTEM_CLEARING_ACCOUNT');
+        }
+        if (newStatus === 'CLOSED' && account.balance > 0) {
+            throw new Error('CANNOT_CLOSE_ACCOUNT_WITH_NONZERO_BALANCE');
+        }
+
+        this.db.prepare(`
+            UPDATE accounts
+            SET status = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        `).run(newStatus, accountId);
+
+        if (this.auditService && adminUser) {
+            this.auditService.record({
+                actorId: adminUser.userId,
+                actorUsername: adminUser.username,
+                actorRole: adminUser.role,
+                action: `ACCOUNT_STATUS_CHANGED_${newStatus}`,
+                entityType: 'ACCOUNT',
+                entityId: accountId,
+                details: { accountNumber: account.account_number, previousStatus: account.status, newStatus },
+                status: 'SUCCESS'
+            });
+        }
+
+        return this.getAccountById(accountId);
     }
 
     /**
@@ -128,7 +192,7 @@ class AccountService {
             FROM ledger_entries le
             JOIN transactions t ON le.transaction_id = t.id
             WHERE le.account_id = ?
-            ORDER BY le.created_at ASC
+            ORDER BY le.created_at ASC, le.rowid ASC
         `).all(accountId);
 
         // Compute running balance verification
@@ -160,4 +224,3 @@ class AccountService {
 }
 
 module.exports = { AccountService };
-

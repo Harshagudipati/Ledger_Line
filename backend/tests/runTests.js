@@ -4,6 +4,7 @@ const { testIdempotency } = require('./idempotency.test');
 const { testLedger } = require('./ledger.test');
 const { testSecurity } = require('./security.test');
 const { testAudit } = require('./audit.test');
+const { testHttpE2E } = require('./http.e2e.test');
 
 async function runAllSuites() {
     console.log('╔══════════════════════════════════════════════════════════════╗');
@@ -17,7 +18,8 @@ async function runAllSuites() {
         { name: '2. Idempotency Key Validation & Replay Safety', fn: testIdempotency },
         { name: '3. Double-Entry Invariance & Conservation', fn: testLedger },
         { name: '4. Security, RBAC & Ownership Protection', fn: testSecurity },
-        { name: '5. Append-Only Audit Trail & Immutability Triggers', fn: testAudit }
+        { name: '5. Append-Only Audit Trail & Immutability Triggers', fn: testAudit },
+        { name: '6. End-to-End HTTP API, RBAC, Freeze & Rate Limit', fn: testHttpE2E }
     ];
 
     let passed = 0;
@@ -43,7 +45,7 @@ async function runAllSuites() {
         console.error('❌ Some tests failed.');
         process.exit(1);
     } else {
-        console.log('🎉 ALL 5 TEST SUITES PASSED! ALL SUCCESS CRITERIA MET.');
+        console.log('🎉 ALL 6 TEST SUITES PASSED! ALL SUCCESS CRITERIA MET.');
         process.exit(0);
     }
 }

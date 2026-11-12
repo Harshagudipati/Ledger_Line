@@ -1,5 +1,5 @@
 // backend/src/db/seed.js
-const { getDatabase } = require('./database');
+const { getDatabase, withTransaction } = require('./database');
 const { AuthService, hashPassword } = require('../services/authService');
 const { AccountService } = require('../services/accountService');
 const { LedgerService } = require('../services/ledgerService');
@@ -135,8 +135,54 @@ function seedDatabase(dbOrPath = config.DB_PATH) {
     return { db, admin, auditor, alice, bob, charlie };
 }
 
+/**
+ * Auto-seed on first startup when database has no platform users (e.g., fresh clone).
+ */
+function ensureSeeded(dbOrPath = config.DB_PATH) {
+    const db = (typeof dbOrPath === 'object' && dbOrPath !== null) ? dbOrPath : getDatabase(dbOrPath);
+    const userCount = db.prepare('SELECT COUNT(*) as count FROM users WHERE id != ?').get(config.SYSTEM_USER_ID).count;
+    if (userCount === 0) {
+        return seedDatabase(db);
+    }
+    return null;
+}
+
+/**
+ * Reset transactional and account data back to demo baseline while
+ * strictly preserving the append-only audit_logs table.
+ */
+function resetAndSeedDatabase(dbOrPath = config.DB_PATH, actor = null) {
+    const db = (typeof dbOrPath === 'object' && dbOrPath !== null) ? dbOrPath : getDatabase(dbOrPath);
+
+    withTransaction(db, (txDb) => {
+        txDb.exec('DELETE FROM ledger_entries;');
+        txDb.exec('DELETE FROM transactions;');
+        txDb.exec('DELETE FROM idempotency_keys;');
+        txDb.exec('DELETE FROM accounts;');
+        txDb.exec('DELETE FROM users;');
+    });
+
+    const seeded = seedDatabase(db);
+    const auditService = new AuditService(db);
+    auditService.record({
+        actorId: actor?.userId || config.SYSTEM_USER_ID,
+        actorUsername: actor?.username || 'system',
+        actorRole: actor?.role || 'ADMIN',
+        action: 'DEMO_DATABASE_RESET',
+        entityType: 'SYSTEM',
+        details: { note: 'Demo accounts and balances reset; audit_logs preserved.' },
+        status: 'SUCCESS'
+    });
+
+    return seeded;
+}
+
 if (require.main === module) {
     seedDatabase();
 }
 
-module.exports = { seedDatabase };
+module.exports = {
+    seedDatabase,
+    ensureSeeded,
+    resetAndSeedDatabase
+};

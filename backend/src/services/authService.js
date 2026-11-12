@@ -70,10 +70,16 @@ class AuthService {
         if (!username || !email || !password) {
             throw new Error('MISSING_FIELDS');
         }
+        if (typeof password !== 'string' || password.length < 8) {
+            throw new Error('PASSWORD_TOO_SHORT');
+        }
 
         const validRoles = ['ACCOUNT_HOLDER', 'AUDITOR', 'ADMIN'];
         if (!validRoles.includes(role)) {
             throw new Error('INVALID_ROLE');
+        }
+        if (role !== 'ACCOUNT_HOLDER') {
+            throw new Error('FORBIDDEN_SELF_REGISTRATION_ROLE');
         }
 
         const existingUser = this.db.prepare(
@@ -86,10 +92,7 @@ class AuthService {
 
         const userId = 'usr_' + crypto.randomUUID();
         const { hash, salt } = hashPassword(password);
-        
-        // Account holders start in PENDING_APPROVAL unless explicitly auto-approved by admin
-        // Auditors and Admins created via public register also require approval unless bootstrap
-        const initialStatus = role === 'ADMIN' ? 'PENDING_APPROVAL' : 'PENDING_APPROVAL';
+        const initialStatus = 'PENDING_APPROVAL';
 
         this.db.prepare(`
             INSERT INTO users (id, username, email, password_hash, password_salt, role, status)
@@ -154,8 +157,8 @@ class AuthService {
     // FR-4: First-admin bootstrap process
     bootstrapAdmin({ username = 'admin', email = 'admin@ledgerline.local', password = 'AdminPassword123!' }) {
         const adminCount = this.db.prepare(
-            "SELECT COUNT(*) as count FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE'"
-        ).get().count;
+            "SELECT COUNT(*) as count FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE' AND id != ?"
+        ).get(config.SYSTEM_USER_ID).count;
 
         if (adminCount > 0) {
             throw new Error('ADMIN_ALREADY_BOOTSTRAPPED');

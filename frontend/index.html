@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LedgerLine / BalanceVault - Double-Entry Ledger System</title>
-    <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
@@ -12,7 +11,7 @@
             background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f766e 100%);
         }
         @media print {
-            header, section, .tab-button, #action-panel, .no-print {
+            header, section, .tab-button, #action-panel, #idempotency-demo-card, .no-print {
                 display: none !important;
             }
             main {
@@ -51,7 +50,7 @@
                 <button onclick="loginAs('charlie')" class="persona-btn px-2.5 py-1 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-300 transition" id="btn-charlie" title="Charlie - Pending User (Tests FR-6/7 Onboarding)">
                     <i class="fa-solid fa-user-clock text-amber-400 mr-1"></i> Charlie (Pending)
                 </button>
-                <button onclick="loginAs('admin')" class="persona-btn px-2.5 py-1 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition" id="btn-admin" title="Admin - Operator with user approval powers">
+                <button onclick="loginAs('admin')" class="persona-btn px-2.5 py-1 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition" id="btn-admin" title="Admin - Operator with user & account controls">
                     <i class="fa-solid fa-shield-halved text-amber-400 mr-1"></i> Admin
                 </button>
                 <button onclick="loginAs('auditor')" class="persona-btn px-2.5 py-1 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition" id="btn-auditor" title="Auditor - Read-only compliance inspector">
@@ -90,9 +89,9 @@
                     </span>
                 </div>
                 <div class="text-slate-400 hidden md:inline">|</div>
-                <div class="flex items-center gap-1 text-slate-500 hidden md:flex">
-                    <i class="fa-solid fa-bolt text-amber-500"></i>
-                    <span>Idempotency & Concurrency: <strong class="text-slate-700">ACTIVE</strong></span>
+                <div class="flex items-center gap-1.5 text-slate-500 hidden md:flex" id="health-status-pill">
+                    <i class="fa-solid fa-heart-pulse text-emerald-500"></i>
+                    <span>API Health: <strong id="api-health-text" class="text-emerald-700">UP</strong></span>
                 </div>
             </div>
         </div>
@@ -102,17 +101,17 @@
     <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 w-full">
 
         <!-- Navigation Tabs -->
-        <div class="flex border-b border-slate-200 mb-6 space-x-6 text-sm font-medium">
-            <button onclick="switchTab('holder-tab')" id="tab-btn-holder" class="tab-button pb-3 border-b-2 border-teal-600 text-teal-600 flex items-center gap-2">
+        <div class="flex overflow-x-auto border-b border-slate-200 mb-6 space-x-6 text-sm font-medium">
+            <button onclick="switchTab('holder-tab')" id="tab-btn-holder" class="tab-button pb-3 border-b-2 border-teal-600 text-teal-600 flex items-center gap-2 whitespace-nowrap">
                 <i class="fa-solid fa-wallet"></i> Account Holder
             </button>
-            <button onclick="switchTab('admin-tab')" id="tab-btn-admin" class="tab-button pb-3 border-b-2 border-transparent text-slate-500 hover:text-slate-700 flex items-center gap-2">
+            <button onclick="switchTab('admin-tab')" id="tab-btn-admin" class="tab-button pb-3 border-b-2 border-transparent text-slate-500 hover:text-slate-700 flex items-center gap-2 whitespace-nowrap">
                 <i class="fa-solid fa-users-gear"></i> Administrator
             </button>
-            <button onclick="switchTab('auditor-tab')" id="tab-btn-auditor" class="tab-button pb-3 border-b-2 border-transparent text-slate-500 hover:text-slate-700 flex items-center gap-2">
+            <button onclick="switchTab('auditor-tab')" id="tab-btn-auditor" class="tab-button pb-3 border-b-2 border-transparent text-slate-500 hover:text-slate-700 flex items-center gap-2 whitespace-nowrap">
                 <i class="fa-solid fa-book-journal-whills"></i> Auditor & Double-Entry Ledger
             </button>
-            <button onclick="switchTab('concurrency-tab')" id="tab-btn-concurrency" class="tab-button pb-3 border-b-2 border-transparent text-slate-500 hover:text-slate-700 flex items-center gap-2">
+            <button onclick="switchTab('concurrency-tab')" id="tab-btn-concurrency" class="tab-button pb-3 border-b-2 border-transparent text-slate-500 hover:text-slate-700 flex items-center gap-2 whitespace-nowrap">
                 <i class="fa-solid fa-gauge-high text-amber-500"></i> 100-Parallel Stress Test
             </button>
         </div>
@@ -124,13 +123,26 @@
         <!-- TAB 1: ACCOUNT HOLDER DASHBOARD -->
         <!-- =================================================================== -->
         <div id="holder-tab" class="tab-content space-y-6">
-            
+
+            <!-- Unauthenticated Banner -->
+            <div id="holder-unauth-warning" class="hidden bg-slate-100 border border-slate-300 p-4 rounded-xl flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <i class="fa-solid fa-lock text-slate-500 text-xl"></i>
+                    <div>
+                        <div class="text-xs font-bold text-slate-800">Session Signed Out</div>
+                        <div class="text-xs text-slate-600">Select a demo persona in the top bar or sign in to view accounts and move money.</div>
+                    </div>
+                </div>
+                <button onclick="loginAs('alice')" class="px-3 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 text-white font-medium text-xs shadow-sm transition">
+                    Sign in as Alice
+                </button>
+            </div>
+
             <!-- Account Switcher Bar (FR-9 Multiple Accounts) -->
-            <div class="flex flex-wrap justify-between items-center bg-white p-3.5 rounded-xl border border-slate-200 shadow-sm gap-3">
+            <div class="no-print flex flex-wrap justify-between items-center bg-white p-3.5 rounded-xl border border-slate-200 shadow-sm gap-3">
                 <div class="flex items-center gap-2">
                     <span class="text-xs font-semibold text-slate-600">Active Account:</span>
                     <select id="user-accounts-select" onchange="switchActiveAccount(this.value)" class="text-xs font-mono font-medium bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 focus:ring-2 focus:ring-teal-500 focus:outline-none">
-                        <!-- Populated dynamically with user's accounts -->
                     </select>
                 </div>
                 <div class="flex items-center gap-2">
@@ -156,8 +168,8 @@
                             <div class="text-lg font-mono font-semibold tracking-wider text-slate-200" id="account-number-display">ACC-••••••••</div>
                         </div>
                         <div class="text-right">
-                            <span class="inline-flex items-center gap-1 text-xs text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-500/30">
-                                <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> Active
+                            <span id="account-status-badge" class="inline-flex items-center gap-1 text-xs text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-500/30">
+                                <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> ACTIVE
                             </span>
                             <div class="text-xs text-slate-400 mt-2">Currency</div>
                             <div class="text-sm font-semibold text-slate-200">USD ($)</div>
@@ -193,9 +205,25 @@
                         </button>
                     </div>
                     <div class="text-[11px] text-slate-500 text-center">
-                        Every action auto-generates a unique <code class="bg-slate-100 px-1 py-0.5 rounded text-slate-700">Idempotency-Key</code>
+                        Every action carries a unique <code class="bg-slate-100 px-1 py-0.5 rounded text-slate-700">Idempotency-Key</code>
                     </div>
                 </div>
+            </div>
+
+            <!-- Live Idempotency Replay Verifier Card (FR-16, FR-17) -->
+            <div id="idempotency-demo-card" class="hidden bg-indigo-50/70 border border-indigo-200 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
+                <div class="text-xs">
+                    <div class="font-bold text-indigo-900 flex items-center gap-1.5">
+                        <i class="fa-solid fa-shield-cat text-indigo-600"></i> Idempotency Verification (FR-17)
+                    </div>
+                    <div class="text-indigo-700 mt-0.5">
+                        Last Key: <code id="last-idempotency-key" class="bg-white px-1.5 py-0.5 rounded border border-indigo-200 font-mono text-[11px]">-</code>
+                        &bull; <span id="last-idempotency-desc">-</span>
+                    </div>
+                </div>
+                <button onclick="replayLastTransaction()" class="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs shadow-sm transition flex items-center gap-1.5">
+                    <i class="fa-solid fa-repeat"></i> Replay Same Request (Verify No Double Charge)
+                </button>
             </div>
 
             <!-- Account Statement Table -->
@@ -205,9 +233,12 @@
                         <h3 class="text-base font-bold text-slate-900 flex items-center gap-2">
                             <i class="fa-solid fa-list-check text-teal-600"></i> Account Statement & Running Balance (FR-20)
                         </h3>
-                        <p class="text-xs text-slate-500 mt-0.5">Audited chronological record of all debits and credits for this account</p>
+                        <p class="text-xs text-slate-500 mt-0.5">
+                            Audited chronological record of all debits and credits
+                            <span id="statement-consistency-badge" class="ml-1 hidden px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800">Running Balance Verified</span>
+                        </p>
                     </div>
-                    <div class="flex items-center gap-2">
+                    <div class="no-print flex items-center gap-2">
                         <button onclick="exportStatementCSV()" class="text-xs px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-medium transition flex items-center gap-1.5" title="Export statement entries to CSV">
                             <i class="fa-solid fa-file-csv text-teal-600"></i> Export CSV
                         </button>
@@ -247,13 +278,13 @@
         <!-- =================================================================== -->
         <div id="admin-tab" class="tab-content hidden space-y-6">
             
-            <!-- Role Guard Banner (Displayed if logged in as Non-Admin) -->
+            <!-- Role Guard Banner -->
             <div id="admin-role-warning" class="hidden bg-amber-50 border border-amber-200 p-4 rounded-xl flex items-center justify-between">
                 <div class="flex items-center gap-3">
                     <i class="fa-solid fa-triangle-exclamation text-amber-500 text-xl"></i>
                     <div>
                         <div class="text-xs font-bold text-amber-800">Administrator Access Required</div>
-                        <div class="text-xs text-amber-700">You are currently viewing as an Account Holder. Switch to the Administrator persona to activate users and access management tools.</div>
+                        <div class="text-xs text-amber-700">Switch to the Administrator persona to manage users, approve onboarding, freeze/unfreeze accounts, or reset demo state.</div>
                     </div>
                 </div>
                 <button onclick="loginAs('admin')" class="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium text-xs shadow-sm transition">
@@ -271,7 +302,7 @@
                 <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200">
                     <div class="text-xs text-slate-500 font-medium">Customer Accounts</div>
                     <div class="text-2xl font-bold text-slate-900 mt-1" id="stat-total-accounts">-</div>
-                    <div class="text-[11px] text-teal-600 mt-1">Multi-currency ready</div>
+                    <div class="text-[11px] text-teal-600 mt-1" id="stat-total-balances">Total: $0.00</div>
                 </div>
                 <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200">
                     <div class="text-xs text-slate-500 font-medium">Total Ledger Transactions</div>
@@ -292,20 +323,23 @@
                         <h3 class="text-base font-bold text-slate-900 flex items-center gap-2">
                             <i class="fa-solid fa-user-check text-teal-600"></i> User Onboarding & Access Control (FR-6, FR-7, FR-8)
                         </h3>
-                        <p class="text-xs text-slate-500 mt-0.5">Approve new self-registered holders or manage system permissions</p>
+                        <p class="text-xs text-slate-500 mt-0.5">Create users, approve pending registrations, or deactivate access</p>
                     </div>
-                    <div class="flex items-center gap-2">
+                    <div class="flex flex-wrap items-center gap-2">
                         <select id="admin-user-filter" onchange="loadAdminUsers()" class="text-xs bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 focus:ring-2 focus:ring-teal-500">
                             <option value="">All Statuses</option>
                             <option value="PENDING_APPROVAL">Pending Approval Only</option>
                             <option value="ACTIVE">Active Users</option>
                             <option value="DEACTIVATED">Deactivated Users</option>
                         </select>
-                        <button onclick="resetDemoSeedData()" class="text-xs px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 font-medium transition flex items-center gap-1.5" title="Reset all users and accounts back to demo baseline">
+                        <button onclick="openAdminCreateUserModal()" class="text-xs px-3 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 text-white font-medium transition flex items-center gap-1.5 shadow-sm">
+                            <i class="fa-solid fa-user-plus"></i> Create User
+                        </button>
+                        <button onclick="resetDemoSeedData()" class="text-xs px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 font-medium transition flex items-center gap-1.5" title="Reset balances and users to demo baseline while preserving audit trail">
                             <i class="fa-solid fa-arrows-rotate text-rose-500"></i> Reset Demo DB
                         </button>
                         <button onclick="loadAdminUsers()" class="text-xs px-3 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium transition flex items-center gap-1.5">
-                            <i class="fa-solid fa-rotate-right"></i> Refresh Users
+                            <i class="fa-solid fa-rotate-right"></i> Refresh
                         </button>
                     </div>
                 </div>
@@ -329,6 +363,40 @@
                     </table>
                 </div>
             </div>
+
+            <!-- Accounts Oversight & Status Control (FR-9) -->
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                <div class="p-5 border-b border-slate-200 flex justify-between items-center bg-slate-50/50">
+                    <div>
+                        <h3 class="text-base font-bold text-slate-900 flex items-center gap-2">
+                            <i class="fa-solid fa-building-lock text-indigo-600"></i> Platform Accounts & Status Controls (FR-9)
+                        </h3>
+                        <p class="text-xs text-slate-500 mt-0.5">Freeze or activate accounts; frozen accounts automatically reject all debits and credits</p>
+                    </div>
+                    <button onclick="loadAdminAccounts()" class="text-xs px-3 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium transition flex items-center gap-1.5">
+                        <i class="fa-solid fa-rotate-right"></i> Refresh Accounts
+                    </button>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-xs text-slate-700">
+                        <thead class="bg-slate-100 text-slate-600 uppercase font-semibold border-b border-slate-200">
+                            <tr>
+                                <th class="py-3 px-4">Account Number</th>
+                                <th class="py-3 px-4">Owner</th>
+                                <th class="py-3 px-4">Type</th>
+                                <th class="py-3 px-4">Status</th>
+                                <th class="py-3 px-4 text-right">Balance</th>
+                                <th class="py-3 px-4 text-right">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="admin-accounts-table-body" class="divide-y divide-slate-100">
+                            <tr>
+                                <td colspan="6" class="py-8 text-center text-slate-400">Loading platform accounts...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
 
         <!-- =================================================================== -->
@@ -336,13 +404,13 @@
         <!-- =================================================================== -->
         <div id="auditor-tab" class="tab-content hidden space-y-6">
             
-            <!-- Role Guard Banner (Displayed if logged in as Non-Auditor/Non-Admin) -->
+            <!-- Role Guard Banner -->
             <div id="auditor-role-warning" class="hidden bg-teal-50 border border-teal-200 p-4 rounded-xl flex items-center justify-between">
                 <div class="flex items-center gap-3">
                     <i class="fa-solid fa-scale-balanced text-teal-600 text-xl"></i>
                     <div>
                         <div class="text-xs font-bold text-teal-900">Auditor Access Required</div>
-                        <div class="text-xs text-teal-700">You are currently viewing as an Account Holder. Switch to the Auditor persona to inspect general ledger lines and immutable audit trails.</div>
+                        <div class="text-xs text-teal-700">Switch to the Auditor persona to inspect general ledger lines and the immutable audit trail.</div>
                     </div>
                 </div>
                 <button onclick="loginAs('auditor')" class="px-3 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 text-white font-medium text-xs shadow-sm transition">
@@ -359,8 +427,7 @@
                         </span>
                         <h2 class="text-xl font-bold text-slate-900 mt-2">Double-Entry Money Conservation Verification</h2>
                         <p class="text-xs text-slate-500 mt-1">
-                            In double-entry bookkeeping, money cannot be created or destroyed. Every transaction must satisfy:
-                            <code class="bg-slate-100 px-1 py-0.5 rounded text-teal-800 font-mono">Σ(Debits) - Σ(Credits) = 0</code>.
+                            Every transaction satisfies <code class="bg-slate-100 px-1 py-0.5 rounded text-teal-800 font-mono">Σ(Debits) - Σ(Credits) = 0</code> and total customer balances equal the clearing vault.
                         </p>
                     </div>
                     <button onclick="verifyLedgerConservation()" class="px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white font-medium text-xs flex items-center gap-2 shadow-sm transition">
@@ -368,7 +435,7 @@
                     </button>
                 </div>
 
-                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-6">
+                <div class="grid grid-cols-1 sm:grid-cols-4 gap-4 mt-6">
                     <div class="bg-slate-50 p-4 rounded-xl border border-slate-200">
                         <div class="text-xs text-slate-500">Total System Debits</div>
                         <div class="text-2xl font-bold text-slate-800 mt-1" id="audit-total-debits">$0.00</div>
@@ -378,6 +445,11 @@
                         <div class="text-xs text-slate-500">Total System Credits</div>
                         <div class="text-2xl font-bold text-slate-800 mt-1" id="audit-total-credits">$0.00</div>
                         <div class="text-[11px] text-slate-400 mt-1">Across all accounts</div>
+                    </div>
+                    <div class="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                        <div class="text-xs text-slate-500">Customer vs Vault</div>
+                        <div class="text-lg font-bold text-slate-800 mt-1" id="audit-vault-match">$0.00 = $0.00</div>
+                        <div class="text-[11px] text-teal-600 font-medium mt-1" id="audit-vault-status">Consistent</div>
                     </div>
                     <div class="bg-emerald-50 p-4 rounded-xl border border-emerald-200">
                         <div class="text-xs text-emerald-800 font-semibold">Ledger Imbalance (Δ)</div>
@@ -389,23 +461,36 @@
 
             <!-- Double-Entry Ledger Raw Entries -->
             <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-                <div class="p-5 border-b border-slate-200 flex justify-between items-center bg-slate-50/50">
+                <div class="p-5 border-b border-slate-200 flex flex-wrap justify-between items-center bg-slate-50/50 gap-3">
                     <div>
                         <h3 class="text-base font-bold text-slate-900 flex items-center gap-2">
                             <i class="fa-solid fa-table-columns text-teal-600"></i> Double-Entry General Ledger (All Entries)
                         </h3>
                         <p class="text-xs text-slate-500 mt-0.5">Read-only view for Auditors (Auditors cannot mutate ledger data)</p>
                     </div>
-                    <button onclick="loadLedgerEntries()" class="text-xs px-3 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium transition flex items-center gap-1.5">
-                        <i class="fa-solid fa-rotate-right"></i> Refresh Ledger
-                    </button>
+                    <div class="flex items-center gap-2">
+                        <select id="ledger-type-filter" onchange="loadLedgerEntries()" class="text-xs bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 focus:ring-2 focus:ring-teal-500">
+                            <option value="">All Types</option>
+                            <option value="DEPOSIT">Deposits</option>
+                            <option value="WITHDRAWAL">Withdrawals</option>
+                            <option value="TRANSFER">Transfers</option>
+                        </select>
+                        <select id="ledger-direction-filter" onchange="loadLedgerEntries()" class="text-xs bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 focus:ring-2 focus:ring-teal-500">
+                            <option value="">All Directions</option>
+                            <option value="DEBIT">DEBIT Only</option>
+                            <option value="CREDIT">CREDIT Only</option>
+                        </select>
+                        <button onclick="loadLedgerEntries()" class="text-xs px-3 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium transition flex items-center gap-1.5">
+                            <i class="fa-solid fa-rotate-right"></i> Refresh
+                        </button>
+                    </div>
                 </div>
                 <div class="overflow-x-auto max-h-96">
                     <table class="w-full text-left text-xs text-slate-700">
                         <thead class="bg-slate-100 text-slate-600 uppercase font-semibold border-b border-slate-200 sticky top-0">
                             <tr>
                                 <th class="py-3 px-4">Entry ID</th>
-                                <th class="py-3 px-4">Transaction ID</th>
+                                <th class="py-3 px-4">Transaction</th>
                                 <th class="py-3 px-4">Account Number</th>
                                 <th class="py-3 px-4">Owner</th>
                                 <th class="py-3 px-4">Direction</th>
@@ -435,11 +520,11 @@
                         <select id="audit-status-filter" onchange="loadAuditLogs()" class="text-xs bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 focus:ring-2 focus:ring-teal-500">
                             <option value="">All Statuses</option>
                             <option value="SUCCESS">Success Only</option>
-                            <option value="FAILURE">Failures / Blocked Attempts</option>
+                            <option value="FAILURE">Failures / Blocked</option>
                             <option value="UNAUTHORIZED">Unauthorized Access</option>
                         </select>
                         <button onclick="loadAuditLogs()" class="text-xs px-3 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium transition flex items-center gap-1.5">
-                            <i class="fa-solid fa-rotate-right"></i> Refresh Audit
+                            <i class="fa-solid fa-rotate-right"></i> Refresh
                         </button>
                     </div>
                 </div>
@@ -477,23 +562,26 @@
                     </span>
                     <h2 class="text-xl font-bold text-slate-900 mt-2">100 Simultaneous Parallel Withdrawals Simulation</h2>
                     <p class="text-sm text-slate-600 mt-1">
-                        This live test fires <strong>100 simultaneous withdrawal requests</strong> against the current account in parallel.
-                        Due to database row-level locking (<code class="bg-slate-100 px-1 py-0.5 rounded font-mono">BEGIN IMMEDIATE</code> / <code class="bg-slate-100 px-1 py-0.5 rounded font-mono">SELECT FOR UPDATE</code>), 
-                        only valid requests can succeed before funds are exhausted. The account balance is <strong>provably protected from ever going negative</strong>!
+                        This live test fires <strong>100 simultaneous withdrawal requests</strong> against the active account in parallel.
+                        Because transactions execute under exclusive write locks (<code class="bg-slate-100 px-1 py-0.5 rounded font-mono">BEGIN IMMEDIATE</code>), 
+                        only valid requests succeed before funds are exhausted, and the balance <strong>never goes negative</strong>.
                     </p>
                 </div>
 
                 <div class="mt-6 p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-wrap items-center gap-4">
                     <div>
-                        <div class="text-xs text-slate-500">Withdrawal Amount Per Request</div>
-                        <div class="text-lg font-bold text-slate-800">$10.00</div>
+                        <div class="text-xs text-slate-500">Target Account Balance</div>
+                        <div class="text-lg font-bold text-slate-800" id="stress-current-balance">$0.00</div>
                     </div>
                     <div class="text-slate-300">|</div>
                     <div>
-                        <div class="text-xs text-slate-500">Total Simultaneous Requests</div>
-                        <div class="text-lg font-bold text-slate-800">100 Parallel Requests</div>
+                        <div class="text-xs text-slate-500">Withdrawal Per Request</div>
+                        <div class="text-lg font-bold text-slate-800">$10.00 &times; 100</div>
                     </div>
-                    <div class="ml-auto">
+                    <div class="ml-auto flex flex-wrap items-center gap-2">
+                        <button onclick="topUpForStressTest()" class="px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-sm flex items-center gap-1.5 transition">
+                            <i class="fa-solid fa-plus"></i> Top Up $100.00
+                        </button>
                         <button onclick="runConcurrencyStressTest()" id="btn-run-stress-test" class="px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-bold text-sm shadow-md flex items-center gap-2 transition">
                             <i class="fa-solid fa-play"></i> Fire 100 Parallel Requests Now
                         </button>
@@ -521,8 +609,7 @@
                         </div>
                     </div>
 
-                    <div class="p-4 bg-slate-900 text-slate-200 rounded-xl font-mono text-xs max-h-60 overflow-y-auto" id="stress-log-console">
-                        <!-- Terminal logs will appear here -->
+                    <div class="p-4 bg-slate-900 text-slate-200 rounded-xl font-mono text-xs max-h-60 overflow-y-auto whitespace-pre-wrap" id="stress-log-console">
                     </div>
                 </div>
             </div>
@@ -564,6 +651,43 @@
         </div>
     </div>
 
+    <!-- Admin Create User Modal (FR-8) -->
+    <div id="admin-create-user-modal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200">
+            <h3 class="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <i class="fa-solid fa-user-plus text-teal-600"></i> Create Platform User
+            </h3>
+            <p class="text-xs text-slate-500 mt-1">Provision a new active Administrator, Auditor, or Account Holder.</p>
+
+            <form onsubmit="handleAdminCreateUser(event)" class="mt-4 space-y-3">
+                <div>
+                    <label class="block text-xs font-semibold text-slate-700">Username</label>
+                    <input type="text" id="admin-new-username" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-sm" required>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-slate-700">Email Address</label>
+                    <input type="email" id="admin-new-email" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-sm" required>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-slate-700">Password (min 8 chars)</label>
+                    <input type="password" minlength="8" id="admin-new-password" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-sm" required>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-slate-700">Role</label>
+                    <select id="admin-new-role" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-sm">
+                        <option value="ACCOUNT_HOLDER">ACCOUNT_HOLDER (auto-opens Checking account)</option>
+                        <option value="AUDITOR">AUDITOR (read-only compliance)</option>
+                        <option value="ADMIN">ADMIN (platform operator)</option>
+                    </select>
+                </div>
+                <div class="pt-2 flex justify-end gap-2">
+                    <button type="button" onclick="closeModals()" class="px-4 py-2 rounded-lg text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200">Cancel</button>
+                    <button type="submit" class="px-4 py-2 rounded-lg text-xs font-medium text-white bg-teal-600 hover:bg-teal-500">Create User</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <!-- Deposit Modal -->
     <div id="deposit-modal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
         <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200">
@@ -575,7 +699,7 @@
             <form onsubmit="handleDeposit(event)" class="mt-4 space-y-4">
                 <div>
                     <label class="block text-xs font-semibold text-slate-700">Amount (USD $)</label>
-                    <input type="number" step="0.01" min="1" id="deposit-amount-input" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none" placeholder="100.00" required>
+                    <input type="number" step="0.01" min="0.01" id="deposit-amount-input" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none" placeholder="100.00" required>
                 </div>
                 <div>
                     <label class="block text-xs font-semibold text-slate-700">Description</label>
@@ -600,7 +724,7 @@
             <form onsubmit="handleWithdraw(event)" class="mt-4 space-y-4">
                 <div>
                     <label class="block text-xs font-semibold text-slate-700">Amount (USD $)</label>
-                    <input type="number" step="0.01" min="1" id="withdraw-amount-input" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none" placeholder="50.00" required>
+                    <input type="number" step="0.01" min="0.01" id="withdraw-amount-input" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none" placeholder="50.00" required>
                 </div>
                 <div>
                     <label class="block text-xs font-semibold text-slate-700">Description</label>
@@ -626,12 +750,15 @@
                 <div>
                     <label class="block text-xs font-semibold text-slate-700">Destination Account</label>
                     <select id="transfer-destination-select" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none">
-                        <!-- Populated dynamically with available recipient accounts -->
                     </select>
                 </div>
                 <div>
+                    <label class="block text-xs font-semibold text-slate-700">Or Enter Account Number (optional)</label>
+                    <input type="text" id="transfer-account-number-input" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-teal-500 focus:outline-none" placeholder="ACC-12345678">
+                </div>
+                <div>
                     <label class="block text-xs font-semibold text-slate-700">Amount (USD $)</label>
-                    <input type="number" step="0.01" min="1" id="transfer-amount-input" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none" placeholder="25.00" required>
+                    <input type="number" step="0.01" min="0.01" id="transfer-amount-input" class="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none" placeholder="25.00" required>
                 </div>
                 <div>
                     <label class="block text-xs font-semibold text-slate-700">Description</label>
@@ -668,15 +795,17 @@
                     <button type="button" onclick="toggleAuthMode()" id="auth-toggle-btn" class="text-xs text-teal-600 hover:underline">
                         Need an account? Register
                     </button>
-                    <button type="submit" class="px-4 py-2 rounded-lg text-xs font-medium text-white bg-teal-600 hover:bg-teal-500">
-                        Continue
-                    </button>
+                    <div class="flex gap-2">
+                        <button type="button" onclick="closeModals()" class="px-3 py-2 rounded-lg text-xs text-slate-600 bg-slate-100 hover:bg-slate-200">Cancel</button>
+                        <button type="submit" class="px-4 py-2 rounded-lg text-xs font-medium text-white bg-teal-600 hover:bg-teal-500">
+                            Continue
+                        </button>
+                    </div>
                 </div>
             </form>
         </div>
     </div>
 
-    <!-- Application Logic Script -->
     <script src="app.js"></script>
 </body>
 </html>

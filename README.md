@@ -3,7 +3,7 @@
 [![Double-Entry Invariance](https://img.shields.io/badge/Double--Entry-Zero--Sum%20Conserved-emerald?style=for-the-badge&logo=cashapp)](https://github.com/Harshagudipati/ledgerline)
 [![Concurrency](https://img.shields.io/badge/Concurrency%20Test-100%20Parallel%20Safe-blue?style=for-the-badge&logo=lightning)](https://github.com/Harshagudipati/ledgerline)
 [![Audit Immutability](https://img.shields.io/badge/Audit%20Trail-Append--Only%20Protected-indigo?style=for-the-badge&logo=shield)](https://github.com/Harshagudipati/ledgerline)
-[![Tests](https://img.shields.io/badge/Automated%20Tests-5%2F5%20Passed-green?style=for-the-badge&logo=checkmarx)](https://github.com/Harshagudipati/ledgerline)
+[![Tests](https://img.shields.io/badge/Automated%20Tests-6%2F6%20Passed-green?style=for-the-badge&logo=checkmarx)](https://github.com/Harshagudipati/ledgerline)
 
 **Event:** Snovasys Fresher Hiring Challenge 2026 (VVIT)  
 **Author:** Harsha Gudipati ([@Harshagudipati](https://github.com/Harshagudipati))  
@@ -62,7 +62,7 @@
                        └──────────────────────────────────────────┘
 ```
 
-Detailed architectural diagrams and mathematical formulations can be found in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Detailed architectural diagrams and mathematical formulations can be found in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), REST endpoints in [docs/API.md](docs/API.md), and production deployment / PostgreSQL instructions in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ---
 
@@ -77,6 +77,7 @@ All claims specified in the Product Requirements Document are backed by automate
 | **Ledger entries always sum to zero** | Balanced debit/credit double-entry assertion on each transaction | [`backend/tests/ledger.test.js`](backend/tests/ledger.test.js) | ✅ **PASS** |
 | **Account Holder cannot access another holder's funds** | Enforced account-level ownership checks (`owner_id === user.id`) | [`backend/tests/security.test.js`](backend/tests/security.test.js) | ✅ **PASS** |
 | **Audit entries cannot be modified or deleted** | SQLite `BEFORE UPDATE` & `BEFORE DELETE` triggers abort tampering | [`backend/tests/audit.test.js`](backend/tests/audit.test.js) | ✅ **PASS** |
+| **End-to-End HTTP API, Freeze/Close & Rate Limits** | Full REST routing, header idempotency, account freeze & HTTP 429 | [`backend/tests/http.e2e.test.js`](backend/tests/http.e2e.test.js) | ✅ **PASS** |
 
 ---
 
@@ -86,6 +87,7 @@ All claims specified in the Product Requirements Document are backed by automate
 - **Node.js**: v20+, v22+, or v24+ (zero third-party dependencies required!)
 
 ### 1. Clone & Seed Database
+*(Optional — `server.js` also auto-seeds an empty database on first boot!)*
 ```bash
 git clone https://github.com/Harshagudipati/ledgerline.git
 cd ledgerline
@@ -94,7 +96,7 @@ node backend/src/db/seed.js
 
 ### 2. Run All Automated Test Suites
 ```bash
-node backend/tests/runTests.js
+npm test
 ```
 
 Output:
@@ -141,9 +143,20 @@ Final account balance: $0
 ✓ PASS: Audit trail is provably immutable and tamper-proof!
 
 ======================================================
- SUMMARY: 5 Passed, 0 Failed (0.39s)
+ TEST SUITE 6: End-to-End HTTP API, RBAC, Freeze & Rate Limit
 ======================================================
-🎉 ALL 5 TEST SUITES PASSED! ALL SUCCESS CRITERIA MET.
+✓ 1. /api/health, /api/ready & auto-seed on empty DB verified
+✓ 2. Public registration restricted to ACCOUNT_HOLDER + admin onboarding verified
+✓ 3. Recipients privacy, Deposit replay, Account-number Transfer & Withdraw verified
+✓ 4. FR-3 ownership enforcement + FR-9 FROZEN account blocking verified
+✓ 5. RBAC/Failed-login audit records & audit-preserving reset-seed verified
+✓ 6. HTTP 429 auth rate limit + Retry-After headers verified
+✓ PASS: All HTTP End-to-End API, Security, Freeze & Rate Limit checks passed!
+
+======================================================
+ SUMMARY: 6 Passed, 0 Failed
+======================================================
+🎉 ALL 6 TEST SUITES PASSED! ALL SUCCESS CRITERIA MET.
 ```
 
 ### 3. Start Web Dashboard
@@ -172,31 +185,40 @@ Open **[http://localhost:8080](http://localhost:8080)** in your browser.
 ledgerline/
 ├── PRD.md                         # Product Requirements Document
 ├── README.md                      # Primary project documentation & verification
+├── Dockerfile                     # Production container definition (Node 24 LTS)
+├── .dockerignore                  # Docker build exclusions
 ├── package.json                   # Project configuration & test scripts
 ├── .gitignore                     # Git ignore rules
+├── docs/
+│   ├── API.md                     # REST API endpoint specification
+│   ├── ARCHITECTURE.md            # System architecture & math invariants
+│   ├── DEMO_GUIDE.md              # Evaluator walkthrough guide
+│   └── DEPLOYMENT.md              # Docker, Render, Railway, Fly.io & PostgreSQL guide
 ├── backend/
 │   ├── src/
 │   │   ├── config.js              # Application configuration
 │   │   ├── server.js              # HTTP server & REST API router
 │   │   ├── db/
-│   │   │   ├── schema.sql         # Database schema, constraints & triggers
+│   │   │   ├── schema.sql         # SQLite DDL, constraints & triggers
+│   │   │   ├── schema.postgres.sql# Production PostgreSQL DDL & PL/pgSQL triggers
 │   │   │   ├── database.js        # SQLite connection & transaction management
-│   │   │   └── seed.js            # Initial demo seed data & verification
+│   │   │   └── seed.js            # Initial demo seed & audit-safe reset logic
 │   │   ├── middleware/
 │   │   │   ├── auth.js            # JWT verification & RBAC enforcement
-│   │   │   └── rateLimiter.js     # Token bucket rate limiting
+│   │   │   └── rateLimiter.js     # Split auth/API token-bucket rate limiters
 │   │   └── services/
 │   │       ├── authService.js     # Password hashing, JWT tokens, bootstrap
-│   │       ├── accountService.js  # Account creation, statements, ownership
+│   │       ├── accountService.js  # Account creation, recipients, freeze/close, statements
 │   │       ├── ledgerService.js   # Double-entry, idempotency, concurrency
 │   │       ├── auditService.js    # Append-only audit trail
-│   │       └── adminService.js    # User management & onboarding workflow
+│   │       └── adminService.js    # User provisioning, approvals & stats
 │   └── tests/
 │       ├── concurrency.test.js    # 100 parallel withdrawals test
 │       ├── idempotency.test.js    # Idempotency key replay test
 │       ├── ledger.test.js         # Double-entry zero-sum & conservation test
 │       ├── security.test.js       # Cross-account & RBAC security test
 │       ├── audit.test.js          # Database trigger immutability test
+│       ├── http.e2e.test.js       # End-to-end HTTP API, freeze & rate-limit test
 │       └── runTests.js            # Master test runner
 ├── frontend/
 │   ├── index.html                 # Single Page Application Dashboard

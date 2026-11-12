@@ -17,6 +17,41 @@ class LedgerService {
     }
 
     /**
+     * Check idempotency registry or mark key IN_PROGRESS inside active transaction.
+     * Returns cached payload object if already completed, otherwise null.
+     */
+    beginIdempotency(txDb, { idempotencyKey, userId, requestPath, paramsHash }) {
+        const existingKey = txDb.prepare(`
+            SELECT status, response_code, response_body, request_params_hash
+            FROM idempotency_keys
+            WHERE key = ?
+        `).get(idempotencyKey);
+
+        if (existingKey) {
+            if (existingKey.request_params_hash !== paramsHash) {
+                throw new Error('IDEMPOTENCY_KEY_PAYLOAD_MISMATCH');
+            }
+            if (existingKey.status === 'COMPLETED') {
+                return {
+                    isCached: true,
+                    ...JSON.parse(existingKey.response_body)
+                };
+            }
+            if (existingKey.status === 'IN_PROGRESS') {
+                throw new Error('CONCURRENT_TRANSACTION_IN_PROGRESS');
+            }
+        }
+
+        const expiresAt = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+        txDb.prepare(`
+            INSERT OR REPLACE INTO idempotency_keys (key, user_id, request_path, request_params_hash, status, expires_at)
+            VALUES (?, ?, ?, ?, 'IN_PROGRESS', ?)
+        `).run(idempotencyKey, userId, requestPath, paramsHash, expiresAt);
+
+        return null;
+    }
+
+    /**
      * FR-11: Deposit money into an account.
      * Generates double-entry:
      * - DEBIT: System Clearing Account (Cash Reserve Increase)
@@ -33,40 +68,25 @@ class LedgerService {
         const paramsHash = this.hashParams({ type: 'DEPOSIT', accountId, amount });
 
         return withTransaction(this.db, (txDb) => {
-            // Check Idempotency Key
-            const existingKey = txDb.prepare(`
-                SELECT status, response_code, response_body, request_params_hash
-                FROM idempotency_keys
-                WHERE key = ?
-            `).get(idempotencyKey);
-
-            if (existingKey) {
-                if (existingKey.request_params_hash !== paramsHash) {
-                    throw new Error('IDEMPOTENCY_KEY_PAYLOAD_MISMATCH');
-                }
-                if (existingKey.status === 'COMPLETED') {
-                    return {
-                        isCached: true,
-                        ...JSON.parse(existingKey.response_body)
-                    };
-                }
-                if (existingKey.status === 'IN_PROGRESS') {
-                    throw new Error('CONCURRENT_TRANSACTION_IN_PROGRESS');
-                }
-            }
-
-            // Register key as IN_PROGRESS
-            const expiresAt = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
-            txDb.prepare(`
-                INSERT OR REPLACE INTO idempotency_keys (key, user_id, request_path, request_params_hash, status, expires_at)
-                VALUES (?, ?, ?, ?, 'IN_PROGRESS', ?)
-            `).run(idempotencyKey, actor.userId, '/api/transactions/deposit', paramsHash, expiresAt);
+            const cached = this.beginIdempotency(txDb, {
+                idempotencyKey,
+                userId: actor.userId,
+                requestPath: '/api/transactions/deposit',
+                paramsHash
+            });
+            if (cached) return cached;
 
             // Fetch target account
             const destAccount = txDb.prepare('SELECT id, owner_id, balance, status FROM accounts WHERE id = ?').get(accountId);
             if (!destAccount) {
                 this.markIdempotencyFailed(txDb, idempotencyKey, 404, 'ACCOUNT_NOT_FOUND');
                 throw new Error('ACCOUNT_NOT_FOUND');
+            }
+
+            // FR-3: Account-level ownership check
+            if (actor.role === 'ACCOUNT_HOLDER' && destAccount.owner_id !== actor.userId) {
+                this.markIdempotencyFailed(txDb, idempotencyKey, 403, 'UNAUTHORIZED_ACCOUNT_ACCESS');
+                throw new Error('UNAUTHORIZED_ACCOUNT_ACCESS');
             }
 
             if (destAccount.status !== 'ACTIVE') {
@@ -164,34 +184,13 @@ class LedgerService {
         const paramsHash = this.hashParams({ type: 'WITHDRAWAL', accountId, amount });
 
         return withTransaction(this.db, (txDb) => {
-            // Check Idempotency Key
-            const existingKey = txDb.prepare(`
-                SELECT status, response_code, response_body, request_params_hash
-                FROM idempotency_keys
-                WHERE key = ?
-            `).get(idempotencyKey);
-
-            if (existingKey) {
-                if (existingKey.request_params_hash !== paramsHash) {
-                    throw new Error('IDEMPOTENCY_KEY_PAYLOAD_MISMATCH');
-                }
-                if (existingKey.status === 'COMPLETED') {
-                    return {
-                        isCached: true,
-                        ...JSON.parse(existingKey.response_body)
-                    };
-                }
-                if (existingKey.status === 'IN_PROGRESS') {
-                    throw new Error('CONCURRENT_TRANSACTION_IN_PROGRESS');
-                }
-            }
-
-            // Register key as IN_PROGRESS
-            const expiresAt = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
-            txDb.prepare(`
-                INSERT OR REPLACE INTO idempotency_keys (key, user_id, request_path, request_params_hash, status, expires_at)
-                VALUES (?, ?, ?, ?, 'IN_PROGRESS', ?)
-            `).run(idempotencyKey, actor.userId, '/api/transactions/withdraw', paramsHash, expiresAt);
+            const cached = this.beginIdempotency(txDb, {
+                idempotencyKey,
+                userId: actor.userId,
+                requestPath: '/api/transactions/withdraw',
+                paramsHash
+            });
+            if (cached) return cached;
 
             // Fetch source account
             const sourceAccount = txDb.prepare('SELECT id, owner_id, balance, status FROM accounts WHERE id = ?').get(accountId);
@@ -303,65 +302,54 @@ class LedgerService {
 
     /**
      * FR-13: Transfer money between accounts.
+     * Supports destinationAccountId OR destinationAccountNumber.
      * Generates double-entry:
      * - DEBIT: Source Account (Balance Decrease)
      * - CREDIT: Destination Account (Balance Increase)
      * Atomic, isolated, zero-sum, idempotent.
      */
-    transfer({ sourceAccountId, destinationAccountId, amount, idempotencyKey, description = 'Account Transfer', actor }) {
-        if (!sourceAccountId || !destinationAccountId || !amount || !idempotencyKey) {
+    transfer({ sourceAccountId, destinationAccountId = null, destinationAccountNumber = null, amount, idempotencyKey, description = 'Account Transfer', actor }) {
+        const destinationRef = destinationAccountId || destinationAccountNumber;
+        if (!sourceAccountId || !destinationRef || !amount || !idempotencyKey) {
             throw new Error('MISSING_REQUIRED_PARAMETERS');
         }
-        if (sourceAccountId === destinationAccountId) {
+        if (destinationAccountId && sourceAccountId === destinationAccountId) {
             throw new Error('CANNOT_TRANSFER_TO_SAME_ACCOUNT');
         }
         if (typeof amount !== 'number' || amount <= 0 || !Number.isInteger(amount)) {
             throw new Error('INVALID_AMOUNT_MUST_BE_POSITIVE_INTEGER_CENTS');
         }
 
-        const paramsHash = this.hashParams({ type: 'TRANSFER', sourceAccountId, destinationAccountId, amount });
+        const paramsHash = this.hashParams({ type: 'TRANSFER', sourceAccountId, destinationRef, amount });
 
         return withTransaction(this.db, (txDb) => {
-            // Check Idempotency Key
-            const existingKey = txDb.prepare(`
-                SELECT status, response_code, response_body, request_params_hash
-                FROM idempotency_keys
-                WHERE key = ?
-            `).get(idempotencyKey);
-
-            if (existingKey) {
-                if (existingKey.request_params_hash !== paramsHash) {
-                    throw new Error('IDEMPOTENCY_KEY_PAYLOAD_MISMATCH');
-                }
-                if (existingKey.status === 'COMPLETED') {
-                    return {
-                        isCached: true,
-                        ...JSON.parse(existingKey.response_body)
-                    };
-                }
-                if (existingKey.status === 'IN_PROGRESS') {
-                    throw new Error('CONCURRENT_TRANSACTION_IN_PROGRESS');
-                }
-            }
-
-            // Register key as IN_PROGRESS
-            const expiresAt = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
-            txDb.prepare(`
-                INSERT OR REPLACE INTO idempotency_keys (key, user_id, request_path, request_params_hash, status, expires_at)
-                VALUES (?, ?, ?, ?, 'IN_PROGRESS', ?)
-            `).run(idempotencyKey, actor.userId, '/api/transactions/transfer', paramsHash, expiresAt);
+            const cached = this.beginIdempotency(txDb, {
+                idempotencyKey,
+                userId: actor.userId,
+                requestPath: '/api/transactions/transfer',
+                paramsHash
+            });
+            if (cached) return cached;
 
             // Fetch accounts
-            const sourceAccount = txDb.prepare('SELECT id, owner_id, balance, status FROM accounts WHERE id = ?').get(sourceAccountId);
+            const sourceAccount = txDb.prepare('SELECT id, account_number, owner_id, balance, status FROM accounts WHERE id = ?').get(sourceAccountId);
             if (!sourceAccount) {
                 this.markIdempotencyFailed(txDb, idempotencyKey, 404, 'SOURCE_ACCOUNT_NOT_FOUND');
                 throw new Error('SOURCE_ACCOUNT_NOT_FOUND');
             }
 
-            const destAccount = txDb.prepare('SELECT id, owner_id, balance, status FROM accounts WHERE id = ?').get(destinationAccountId);
+            const destAccount = destinationAccountId
+                ? txDb.prepare('SELECT id, account_number, owner_id, balance, status FROM accounts WHERE id = ?').get(destinationAccountId)
+                : txDb.prepare('SELECT id, account_number, owner_id, balance, status FROM accounts WHERE account_number = ?').get(destinationAccountNumber);
+
             if (!destAccount) {
                 this.markIdempotencyFailed(txDb, idempotencyKey, 404, 'DESTINATION_ACCOUNT_NOT_FOUND');
                 throw new Error('DESTINATION_ACCOUNT_NOT_FOUND');
+            }
+
+            if (sourceAccount.id === destAccount.id) {
+                this.markIdempotencyFailed(txDb, idempotencyKey, 400, 'CANNOT_TRANSFER_TO_SAME_ACCOUNT');
+                throw new Error('CANNOT_TRANSFER_TO_SAME_ACCOUNT');
             }
 
             // FR-3: Account-level ownership check
@@ -451,7 +439,7 @@ class LedgerService {
                     action: 'TRANSFER_EXECUTED',
                     entityType: 'TRANSACTION',
                     entityId: transactionId,
-                    details: { amount, sourceAccountId, destinationAccountId, idempotencyKey },
+                    details: { amount, sourceAccountId: sourceAccount.id, destinationAccountId: destAccount.id, idempotencyKey },
                     status: 'SUCCESS'
                 });
             }
@@ -558,28 +546,45 @@ class LedgerService {
 
     /**
      * Get all transactions (for Admin/Auditor) or account-specific transactions.
+     * Enforces FR-3 ownership checks when requestingUser is an ACCOUNT_HOLDER.
      */
-    getTransactions({ limit = 50, offset = 0, accountId = null }) {
+    getTransactions({ limit = 50, offset = 0, accountId = null, requestingUser = null }) {
+        if (accountId && requestingUser && requestingUser.role === 'ACCOUNT_HOLDER') {
+            const account = this.db.prepare('SELECT id, owner_id FROM accounts WHERE id = ?').get(accountId);
+            if (!account) {
+                throw new Error('ACCOUNT_NOT_FOUND');
+            }
+            if (account.owner_id !== requestingUser.userId) {
+                throw new Error('UNAUTHORIZED_ACCOUNT_ACCESS');
+            }
+        }
+
         let query = `
             SELECT t.id, t.type, t.idempotency_key, t.source_account_id,
                    t.destination_account_id, t.amount, t.status, t.description,
                    t.created_by, t.created_at, u.username as creator_username
             FROM transactions t
             JOIN users u ON t.created_by = u.id
+            LEFT JOIN accounts src ON t.source_account_id = src.id
+            LEFT JOIN accounts dst ON t.destination_account_id = dst.id
             WHERE 1=1
         `;
         const params = [];
+
+        if (requestingUser && requestingUser.role === 'ACCOUNT_HOLDER') {
+            query += ' AND (src.owner_id = ? OR dst.owner_id = ?)';
+            params.push(requestingUser.userId, requestingUser.userId);
+        }
 
         if (accountId) {
             query += ' AND (t.source_account_id = ? OR t.destination_account_id = ?)';
             params.push(accountId, accountId);
         }
 
-        query += ' ORDER BY t.created_at DESC LIMIT ? OFFSET ?';
+        query += ' ORDER BY t.created_at DESC, t.rowid DESC LIMIT ? OFFSET ?';
         params.push(limit, offset);
 
-        const transactions = this.db.prepare(query).all(...params);
-        return transactions;
+        return this.db.prepare(query).all(...params);
     }
 }
 

@@ -1,13 +1,21 @@
 {
-  "name": "backend",
+  "name": "ledgerline-backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "LedgerLine / BalanceVault core API, double-entry ledger, and test suite",
+  "main": "src/server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node src/server.js",
+    "seed": "node src/db/seed.js",
+    "test": "node tests/runTests.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "ledger",
+    "double-entry",
+    "idempotency",
+    "concurrency",
+    "rbac"
+  ],
+  "author": "Harshagudipati",
+  "license": "MIT",
   "type": "commonjs"
 }

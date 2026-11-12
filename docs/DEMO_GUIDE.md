@@ -10,16 +10,16 @@
 
 This project is built using native Node.js (v20+ / v22+ / v24+) with zero external npm dependencies required for core database operations, cryptographic auth, transactions, and automated test execution.
 
-### Step 1: Initialize Seed Data
+### Step 1: Initialize Seed Data *(optional — server auto-seeds on first start)*
 ```bash
 node backend/src/db/seed.js
 ```
 
-### Step 2: Run All 5 Automated Test Suites
+### Step 2: Run All 6 Automated Test Suites
 ```bash
-node backend/tests/runTests.js
+npm test
 ```
-*Executes the 100-parallel-withdrawal concurrency test, idempotency validation, double-entry conservation, RBAC checks, and audit immutability triggers.*
+*Executes 100-parallel-withdrawal concurrency protection, idempotency validation, double-entry conservation, RBAC & ownership checks, audit immutability triggers, and full end-to-end HTTP API verification.*
 
 ### Step 3: Launch the Full-Stack Web Application
 ```bash
@@ -55,31 +55,31 @@ Open your browser at: **[http://localhost:8080](http://localhost:8080)**
    - The final balance never drops below \$0.00.
    - The live conservation verification badge confirms the ledger remains 100% balanced!
 
-### Scenario B: Idempotency Protection
-1. Log in as Alice.
-2. Click **Deposit Funds** or **Transfer Money**.
-3. The request executes with an auto-generated `Idempotency-Key`.
-4. Replaying the identical request with the same `Idempotency-Key` returns the original cached response without duplicate execution or double charges.
+### Scenario B: Cross-User Transfers & Idempotency Replay (FR-11, FR-15)
+1. Log in as **Alice**.
+2. Click **Transfer Money** — pick **Bob** from the privacy-preserving recipients dropdown (or enter Bob's `ACC-...` number directly) and submit.
+3. Click **Deposit Funds** or **Transfer Money** again and notice the **"Idempotency Replay Ready"** card appears showing the exact `Idempotency-Key` UUID.
+4. Click **"Replay Identical Request"** to verify the backend returns the cached response (`isCached: true`) without double-charging Alice's account!
+5. Click **Export CSV** in the Account Statement card to download the reconciled ledger statement.
 
-### Scenario C: User Onboarding Workflow (FR-6 & FR-7)
-1. Try logging in as `charlie` / `CharliePassword123!`.
-2. Notice the system rejects login with `ACCOUNT_PENDING_APPROVAL`.
-3. Switch to the **Admin** persona and navigate to the **Administrator** tab.
-4. Locate Charlie in the user table under `PENDING APPROVAL`.
-5. Click **"Approve & Activate"**. An initial checking account is auto-provisioned!
-6. Charlie can now log in immediately.
+### Scenario C: User Onboarding, Admin Provisioning & Account Freeze (FR-6, FR-7, FR-9)
+1. Try clicking the **Charlie (Pending)** persona button — notice the system rejects login (`ACCOUNT_PENDING_APPROVAL`).
+2. Switch to **Admin** and open the **Administrator** tab.
+3. Click **Approve / Activate** on Charlie (an initial `CHECKING` account is auto-provisioned). Switch back to **Charlie** — login now succeeds!
+4. Under **All Customer Accounts (Freeze / Close Controls)**, click **Freeze** on an account to block debits/credits (`FROZEN`), or **Reset Demo DB** to restore initial balances cleanly while keeping append-only `audit_logs` intact.
 
 ### Scenario D: Double-Entry Ledger & Conservation (Auditor View)
-1. Switch to the **Auditor** persona and navigate to the **Auditor & Double-Entry Ledger** tab.
-2. Review the live metrics: Total Debits, Total Credits, and Difference ($\Delta = \$0.00$).
-3. Examine the raw double-entry ledger lines: every transaction has balanced DEBIT and CREDIT lines.
-4. Scroll to the **Immutable Audit Trail**: notice every security, auth, and money action is indelibly recorded.
+1. Switch to the **Auditor** persona and open the **Auditor & Double-Entry Ledger** tab.
+2. Review the live conservation cards: Total Debits, Total Credits, Clearing Vault Liability vs. Customer Equity, and Imbalance ($\Delta = \$0.00$).
+3. Filter raw double-entry ledger lines by **Type** or **DEBIT/CREDIT** direction, and filter the **Immutable Audit Trail** by `SUCCESS`, `FAILURE`, or `UNAUTHORIZED`.
 
 ---
 
-## 4. API Health & Operations Endpoints
+## 4. API Health, Documentation & Deployment
 
-- **Health Check**: `GET http://localhost:8080/api/health`
-- **Readiness Check**: `GET http://localhost:8080/api/ready`
+- **Health Check**: `GET http://localhost:8080/api/health` (public)
+- **Readiness Check**: `GET http://localhost:8080/api/ready` (public)
 - **System Conservation**: `GET http://localhost:8080/api/ledger/conservation` (Requires Bearer token)
+- **REST API Reference**: [`docs/API.md`](./API.md)
+- **Cloud & PostgreSQL Deployment Guide**: [`docs/DEPLOYMENT.md`](./DEPLOYMENT.md)
 
