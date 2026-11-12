@@ -284,6 +284,26 @@ async function testImprovements() {
     assert.ok(auditCsv.body.includes('USER_LOGOUT'));
     console.log('✓ 6. /api/metrics telemetry & /api/audit/logs/export CSV verified');
 
+    // Safe-integer overflow protection (prevents node:sqlite MAX_SAFE_INTEGER errors)
+    const unsafeOverflowRes = await dispatchHttp(server, {
+        method: 'POST',
+        path: '/api/transactions/deposit',
+        headers: { Authorization: `Bearer ${aliceFreshToken}`, 'Idempotency-Key': 'unsafe-overflow-1' },
+        body: { accountId: primaryAcc.id, amount: 11523020055264910 }
+    });
+    assert.strictEqual(unsafeOverflowRes.statusCode, 400);
+    assert.strictEqual(unsafeOverflowRes.json.error, 'INVALID_AMOUNT_MUST_BE_POSITIVE_INTEGER_CENTS');
+
+    const overSingleTxLimitRes = await dispatchHttp(server, {
+        method: 'POST',
+        path: '/api/transactions/deposit',
+        headers: { Authorization: `Bearer ${aliceFreshToken}`, 'Idempotency-Key': 'over-limit-1' },
+        body: { accountId: primaryAcc.id, amount: 500_000_000_000 }
+    });
+    assert.strictEqual(overSingleTxLimitRes.statusCode, 400);
+    assert.strictEqual(overSingleTxLimitRes.json.error, 'AMOUNT_EXCEEDS_SINGLE_TX_LIMIT');
+    console.log('✓ 7. Safe-integer & single-tx balance overflow guardrails verified');
+
     await db.close();
     console.log('✓ PASS: All Phase 1 hardening & new API capabilities verified!');
 }

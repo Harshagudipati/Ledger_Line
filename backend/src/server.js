@@ -705,6 +705,8 @@ function createServer(dbInstance = null, options = {}) {
                 'INVALID_ACCOUNT_TYPE': 400,
                 'INVALID_ACCOUNT_STATUS': 400,
                 'INVALID_AMOUNT_MUST_BE_POSITIVE_INTEGER_CENTS': 400,
+                'AMOUNT_EXCEEDS_SINGLE_TX_LIMIT': 400,
+                'BALANCE_LIMIT_EXCEEDED': 400,
                 'MISSING_REQUIRED_PARAMETERS': 400,
                 'CANNOT_TRANSFER_TO_SAME_ACCOUNT': 400,
                 'CANNOT_CLOSE_ACCOUNT_WITH_NONZERO_BALANCE': 400,

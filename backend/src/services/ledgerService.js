@@ -2,10 +2,24 @@
 const crypto = require('node:crypto');
 const config = require('../config');
 
+// Cap balances and single transactions well inside JavaScript MAX_SAFE_INTEGER (9e15 cents)
+// so node:sqlite never stores 64-bit integers that overflow JS safe integer precision.
+const MAX_SINGLE_TX_CENTS = 100_000_000_000;     // $1,000,000,000.00 per transaction
+const MAX_SAFE_BALANCE_CENTS = 1_000_000_000_000_00; // $1,000,000,000,000.00 max account/vault balance
+
 class LedgerService {
     constructor(db, auditService) {
         this.db = db;
         this.auditService = auditService;
+    }
+
+    validateAmountCents(amount) {
+        if (typeof amount !== 'number' || amount <= 0 || !Number.isSafeInteger(amount)) {
+            throw new Error('INVALID_AMOUNT_MUST_BE_POSITIVE_INTEGER_CENTS');
+        }
+        if (amount > MAX_SINGLE_TX_CENTS) {
+            throw new Error('AMOUNT_EXCEEDS_SINGLE_TX_LIMIT');
+        }
     }
 
     hashParams(params) {
@@ -47,12 +61,10 @@ class LedgerService {
     }
 
     async deposit({ accountId, amount, idempotencyKey, description = 'Cash Deposit', actor }) {
-        if (!accountId || !amount || !idempotencyKey) {
+        if (!accountId || amount === undefined || amount === null || !idempotencyKey) {
             throw new Error('MISSING_REQUIRED_PARAMETERS');
         }
-        if (typeof amount !== 'number' || amount <= 0 || !Number.isInteger(amount)) {
-            throw new Error('INVALID_AMOUNT_MUST_BE_POSITIVE_INTEGER_CENTS');
-        }
+        this.validateAmountCents(amount);
 
         const paramsHash = this.hashParams({ type: 'DEPOSIT', accountId, amount });
 
@@ -94,6 +106,17 @@ class LedgerService {
 
             const transactionId = 'tx_' + crypto.randomUUID();
             const currentBalance = Number(account.balance);
+            const clearingBalance = Number(clearingAccount.balance);
+
+            if (
+                !Number.isSafeInteger(currentBalance + amount) ||
+                currentBalance + amount > MAX_SAFE_BALANCE_CENTS ||
+                !Number.isSafeInteger(clearingBalance + amount) ||
+                clearingBalance + amount > MAX_SAFE_BALANCE_CENTS
+            ) {
+                await this.markIdempotencyFailed(txDb, idempotencyKey, 400, 'BALANCE_LIMIT_EXCEEDED');
+                throw new Error('BALANCE_LIMIT_EXCEEDED');
+            }
 
             await txDb.run(
                 'UPDATE accounts SET balance = balance + ?, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
@@ -153,12 +176,10 @@ class LedgerService {
     }
 
     async withdraw({ accountId, amount, idempotencyKey, description = 'Cash Withdrawal', actor }) {
-        if (!accountId || !amount || !idempotencyKey) {
+        if (!accountId || amount === undefined || amount === null || !idempotencyKey) {
             throw new Error('MISSING_REQUIRED_PARAMETERS');
         }
-        if (typeof amount !== 'number' || amount <= 0 || !Number.isInteger(amount)) {
-            throw new Error('INVALID_AMOUNT_MUST_BE_POSITIVE_INTEGER_CENTS');
-        }
+        this.validateAmountCents(amount);
 
         const paramsHash = this.hashParams({ type: 'WITHDRAWAL', accountId, amount });
 
@@ -284,12 +305,10 @@ class LedgerService {
         description = 'Account Transfer',
         actor
     }) {
-        if (!sourceAccountId || (!destinationAccountId && !destinationAccountNumber) || !amount || !idempotencyKey) {
+        if (!sourceAccountId || (!destinationAccountId && !destinationAccountNumber) || amount === undefined || amount === null || !idempotencyKey) {
             throw new Error('MISSING_REQUIRED_PARAMETERS');
         }
-        if (typeof amount !== 'number' || amount <= 0 || !Number.isInteger(amount)) {
-            throw new Error('INVALID_AMOUNT_MUST_BE_POSITIVE_INTEGER_CENTS');
-        }
+        this.validateAmountCents(amount);
 
         let resolvedDestId = destinationAccountId;
         if (!resolvedDestId && destinationAccountNumber) {
@@ -365,6 +384,11 @@ class LedgerService {
                     });
                 }
                 throw new Error('INSUFFICIENT_FUNDS');
+            }
+
+            if (!Number.isSafeInteger(destBalance + amount) || destBalance + amount > MAX_SAFE_BALANCE_CENTS) {
+                await this.markIdempotencyFailed(txDb, idempotencyKey, 400, 'BALANCE_LIMIT_EXCEEDED');
+                throw new Error('BALANCE_LIMIT_EXCEEDED');
             }
 
             const transactionId = 'tx_' + crypto.randomUUID();
