@@ -1,4 +1,10 @@
 const TOKEN_STORAGE_KEY = 'ledgerline_jwt_token';
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+
+export function buildApiUrl(path) {
+  if (!API_BASE_URL || /^https?:\/\//i.test(path)) return path;
+  return `${API_BASE_URL}${path.startsWith('/') ? path : `/${path}`}`;
+}
 
 let unauthorizedHandler = null;
 
@@ -81,7 +87,7 @@ export async function apiFetch(path, { method = 'GET', body = null, headers = {}
     reqHeaders.Authorization = `Bearer ${token}`;
   }
 
-  const res = await fetch(path, {
+  const res = await fetch(buildApiUrl(path), {
     method,
     headers: reqHeaders,
     body: body !== null ? JSON.stringify(body) : undefined
@@ -122,7 +128,7 @@ export async function downloadAuditCsv(filters = {}) {
     }
   }
   const qs = params.toString();
-  const url = `/api/audit/logs/export${qs ? `?${qs}` : ''}`;
+  const url = buildApiUrl(`/api/audit/logs/export${qs ? `?${qs}` : ''}`);
   const token = getStoredToken();
   const res = await fetch(url, {
     headers: token ? { Authorization: `Bearer ${token}` } : {}
