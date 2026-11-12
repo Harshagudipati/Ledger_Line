@@ -2,7 +2,7 @@
 
 Base URL: `http://localhost:8080/api` (or your deployed domain `/api`)
 
-All monetary values (`amount`, `balance`, `totalDebits`, `totalCredits`, etc.) are represented as **integer minor units (cents)** — for example, `10000` equals `$100.00` — to prevent floating-point rounding drift.
+All monetary values (`amount`, `balance`, `total_debits`, `total_credits`, etc.) are represented as **integer minor units (cents)** — for example, `10000` equals `$100.00` — to prevent floating-point rounding drift.
 
 ---
 
@@ -16,195 +16,153 @@ All monetary values (`amount`, `balance`, `totalDebits`, `totalCredits`, etc.) a
   ```http
   Idempotency-Key: <unique-client-key>
   ```
+- **Correlation Header:** Every response includes `X-Request-Id` matching the JSON telemetry log entry.
 - **Rate Limiting Headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `Retry-After` on HTTP `429`):**
   - Auth routes (`/api/auth/login`, `/api/auth/register`, `/api/auth/bootstrap`): default `30` requests/min per IP (`AUTH_RATE_LIMIT_MAX`).
   - General `/api/*` routes: default `500` requests/min per IP (`RATE_LIMIT_MAX_REQUESTS`).
+  - Uses distributed **Redis** sliding-window sorted sets when `REDIS_URL` is configured, falling back automatically to in-memory sliding windows when unset.
 
 ---
 
-## 2. Health & Readiness
+## 2. Health, Readiness & Monitoring (FR-23)
 
 ### `GET /api/health`
 Public liveness check.
 - **Response (`200 OK`):**
   ```json
-  { "status": "UP", "service": "LedgerLine / BalanceVault API", "timestamp": "2026-11-12T06:00:00.000Z" }
+  { "status": "UP", "service": "LedgerLine / BalanceVault", "version": "1.1.0", "timestamp": "2026-11-12T06:00:00.000Z" }
   ```
 
 ### `GET /api/ready`
-Public readiness probe verifying SQLite database connectivity (`SELECT 1`).
+Public readiness probe verifying database connectivity (`SELECT 1`).
 - **Response (`200 OK`):**
   ```json
-  { "status": "READY", "database": "CONNECTED" }
+  { "status": "READY", "database": "CONNECTED", "dialect": "sqlite", "rateLimiter": "memory", "timestamp": "..." }
   ```
+
+### `GET /api/metrics`
+Returns live service telemetry (`uptimeSeconds`, `totalRequests`, `avgLatencyMs`, `statusBuckets`, `authFailures`, `rateLimitBlocks`, `backends`, `memoryRssMb`, `recentRequests`).
+- **Auth:** `ADMIN`, `AUDITOR`.
 
 ---
 
-## 3. Authentication & Onboarding (FR-1, FR-2, FR-4, FR-6, FR-7)
+## 3. Authentication, Sessions & Bootstrap (FR-1, FR-2, FR-4, FR-6, FR-7)
 
 ### `POST /api/auth/register`
 Public self-registration for new `ACCOUNT_HOLDER` accounts. Users start with `status: "PENDING_APPROVAL"` and cannot log in until approved by an `ADMIN`. Any `role` other than `ACCOUNT_HOLDER` is rejected with `403 FORBIDDEN_SELF_REGISTRATION_ROLE`.
-- **Request Body:**
-  ```json
-  {
-    "username": "new_user",
-    "email": "new_user@example.com",
-    "password": "StrongPassword123!"
-  }
-  ```
-- **Validation Errors:**
-  - `400 MISSING_FIELDS`: Missing required fields
-  - `400 PASSWORD_TOO_SHORT`: Password under 8 characters
-  - `403 FORBIDDEN_SELF_REGISTRATION_ROLE`: Non-holder role requested on public endpoint
-  - `409 USER_ALREADY_EXISTS`: Username or email already registered
+- **Body:** `{ "username": "...", "email": "...", "password": "..." }`
 - **Response (`201 Created`):** User object (`id`, `username`, `email`, `role`, `status`).
 
 ### `POST /api/auth/login`
-Authenticates an `ACTIVE` user and issues an HMAC-SHA256 JWT token. Failed logins are recorded in `audit_logs`.
-- **Request Body:**
-  ```json
-  { "username": "alice", "password": "AlicePassword123!" }
-  ```
-- **Response (`200 OK`):**
-  ```json
-  {
-    "token": "<jwt>",
-    "user": { "id": "...", "username": "alice", "email": "alice@ledgerline.local", "role": "ACCOUNT_HOLDER", "status": "ACTIVE" }
-  }
-  ```
-- **Error Codes:**
-  - `401 INVALID_CREDENTIALS`
-  - `403 ACCOUNT_PENDING_APPROVAL` / `403 ACCOUNT_DEACTIVATED`
+Authenticates an `ACTIVE` user and issues an HMAC-SHA256 JWT containing a unique `jti`. Repeated invalid attempts trigger a brute-force lockout (`MAX_FAILED_LOGINS`, default `5`) returning `429 ACCOUNT_TEMPORARILY_LOCKED`.
+- **Body:** `{ "username": "...", "password": "..." }`
+- **Response (`200 OK`):** `{ "token": "<jwt>", "user": { "id", "username", "email", "role", "status" } }`
+- **Error Codes:** `401 INVALID_CREDENTIALS`, `403 ACCOUNT_PENDING_APPROVAL`, `403 ACCOUNT_DEACTIVATED`, `429 ACCOUNT_TEMPORARILY_LOCKED`.
+
+### `POST /api/auth/logout`
+Revokes the caller's active JWT (`jti`) immediately in `revoked_tokens` and records `USER_LOGOUT` in `audit_logs`. Subsequent requests using the revoked token fail with `401 TOKEN_REVOKED`.
+- **Auth:** Any authenticated role.
+
+### `POST /api/auth/change-password`
+Self-service password rotation. Verifies `currentPassword`, updates PBKDF2-SHA512 hash/salt, revokes the prior JWT (`jti`), and returns a fresh `token`.
+- **Auth:** Any authenticated role.
+- **Body:** `{ "currentPassword": "...", "newPassword": "..." }`
 
 ### `GET /api/auth/bootstrap-status`
-Public check returning `{ "needsBootstrap": true | false }` indicating whether zero `ADMIN` users exist and First-Admin Bootstrap is required.
+Public check returning `{ "needsBootstrap": true | false }` indicating whether zero non-system `ADMIN` users exist.
 
 ### `POST /api/auth/bootstrap`
-First-admin bootstrap endpoint (FR-4). Succeeds **only** when zero non-system `ADMIN` users exist in the database.
-- **Request Body:** `{ "username": "...", "email": "...", "password": "..." }`
-- **Error Code:** `409 ADMIN_ALREADY_BOOTSTRAPPED` once an admin exists.
+First-admin bootstrap endpoint (FR-4). Succeeds **only** when zero non-system `ADMIN` users exist (`409 ADMIN_ALREADY_BOOTSTRAPPED` thereafter).
+- **Body:** `{ "username": "...", "email": "...", "password": "..." }`
 
 ### `GET /api/auth/me`
 Returns the authenticated user's profile.
-- **Auth:** Any authenticated role (`ADMIN`, `ACCOUNT_HOLDER`, `AUDITOR`).
+- **Auth:** Any authenticated role.
 
 ---
 
-## 4. Accounts & Ownership (FR-3, FR-8, FR-9)
+## 4. Accounts, Ownership & Lifecycle (FR-3, FR-8, FR-9, FR-20)
 
 ### `GET /api/accounts`
 - `ACCOUNT_HOLDER`: Returns **only** accounts owned by the authenticated user.
 - `ADMIN` / `AUDITOR`: Returns all accounts (including `owner_username`).
 
 ### `GET /api/accounts/recipients?excludeAccountId=<id>`
-Returns active customer recipient directory (`id`, `account_number`, `account_type`, `currency`, `owner_username`) for transfers without exposing sensitive user emails or account balances. Excludes `SYSTEM_CLEARING`.
-- **Auth:** Any authenticated role.
+Returns active customer recipient directory (`id`, `account_number`, `account_type`, `currency`, `owner_username`) for transfers without exposing emails or balances.
 
 ### `POST /api/accounts`
-Opens a new `CHECKING` or `SAVINGS` account owned by the caller.
+Opens a new `CHECKING` or `SAVINGS` account owned by the caller (or `ownerId` for `ADMIN`).
 - **Auth:** `ACCOUNT_HOLDER`, `ADMIN`.
-- **Request Body:**
-  ```json
-  { "accountType": "SAVINGS", "currency": "USD" }
-  ```
-- **Response (`201 Created`):** Created account object (`id`, `account_number`, `owner_id`, `account_type`, `currency`, `balance`, `status`).
+- **Body:** `{ "accountType": "SAVINGS", "currency": "USD" }`
 
 ### `GET /api/accounts/:id`
-Retrieves single account details. Enforces FR-3 ownership check (`403 UNAUTHORIZED_ACCOUNT_ACCESS` if another `ACCOUNT_HOLDER` requests it).
+Retrieves single account details. Enforces FR-3 ownership check (`403 UNAUTHORIZED_ACCOUNT_ACCESS`).
 
-### `GET /api/accounts/:id/statement`
-Computes the chronological running-balance account statement directly from `ledger_entries` and verifies reconciliation (`calculated_balance === current_balance`). Enforces FR-3 ownership check.
-- **Response (`200 OK`):**
-  ```json
-  {
-    "account": { ... },
-    "current_balance": 100000,
-    "calculated_balance": 100000,
-    "is_balance_consistent": true,
-    "statement_entries": [ { "entry_id": "...", "transaction_type": "DEPOSIT", "direction": "CREDIT", "amount": 100000, "running_balance": 100000, ... } ]
-  }
-  ```
+### `GET /api/accounts/:id/statement?transactionType=&fromDate=&toDate=&search=`
+Computes true chronological `running_balance` across all `ledger_entries` first (`calculated_balance === current_balance`) and optionally filters the returned `statement_entries` by type, date window, or description/idempotency search term.
+
+### `POST /api/accounts/:id/close`
+Atomically closes an `ACTIVE` account (`status -> 'CLOSED'`). If `balance > 0`, requires `destinationAccountId` or `destinationAccountNumber` and performs an atomic double-entry balance sweep inside the same transaction before closing.
+- **Auth:** `ACCOUNT_HOLDER` (owner) or `ADMIN`.
+- **Body:** `{ "destinationAccountId": "acc_..." }` (or `{ "destinationAccountNumber": "ACC-..." }`).
 
 ---
 
-## 5. Money Movement & Idempotency (FR-10 to FR-16)
+## 5. Money Movement & Idempotency (FR-10 to FR-18)
 
-All write operations run inside SQLite `BEGIN IMMEDIATE` exclusive transactions, generate balanced double-entry `DEBIT` and `CREDIT` lines, check account `status === 'ACTIVE'`, and enforce `Idempotency-Key`.
+Write operations run inside exclusive/serialized ACID transactions (`BEGIN IMMEDIATE` on SQLite, ordered `SELECT ... FOR UPDATE` on PostgreSQL), enforce `status === 'ACTIVE'`, check `balance >= amount`, and require `Idempotency-Key`.
 
 ### `POST /api/transactions/deposit`
-Credits a customer account and debits the `SYSTEM_CLEARING` vault. Enforces ownership check for `ACCOUNT_HOLDER`.
+Credits a customer account and debits `SYSTEM_CLEARING`. Enforces ownership for `ACCOUNT_HOLDER`.
 - **Headers:** `Idempotency-Key: <key>`
-- **Auth:** `ACCOUNT_HOLDER`, `ADMIN`
 - **Body:** `{ "accountId": "...", "amount": 10000, "description": "Payroll Deposit" }`
 
 ### `POST /api/transactions/withdraw`
-Debits a customer account and credits the `SYSTEM_CLEARING` vault. Fails atomically with `400 INSUFFICIENT_FUNDS` if `balance < amount`.
+Debits a customer account and credits `SYSTEM_CLEARING`. Rejects overdrafts atomically with `400 INSUFFICIENT_FUNDS`.
 - **Headers:** `Idempotency-Key: <key>`
-- **Auth:** `ACCOUNT_HOLDER`, `ADMIN`
 - **Body:** `{ "accountId": "...", "amount": 1000, "description": "ATM Withdrawal" }`
 
 ### `POST /api/transactions/transfer`
-Zero-sum transfer between two customer accounts. Accepts either `destinationAccountId` or `destinationAccountNumber` (e.g. `ACC-12345678`).
+Zero-sum transfer between two active customer accounts (`destinationAccountId` or `destinationAccountNumber`).
 - **Headers:** `Idempotency-Key: <key>`
-- **Auth:** `ACCOUNT_HOLDER`, `ADMIN`
-- **Body:**
-  ```json
-  {
-    "sourceAccountId": "acc_...",
-    "destinationAccountNumber": "ACC-12345678",
-    "amount": 2500,
-    "description": "Rent share"
-  }
-  ```
+- **Body:** `{ "sourceAccountId": "...", "destinationAccountNumber": "ACC-12345678", "amount": 2500, "description": "Rent share" }`
 
-### `GET /api/transactions?accountId=<id>&limit=50&offset=0`
-Lists transactions. For `ACCOUNT_HOLDER`, results are scoped strictly to transactions involving accounts owned by that user (`403 UNAUTHORIZED_ACCOUNT_ACCESS` if querying someone else's `accountId`).
+### `GET /api/transactions?accountId=&type=&limit=50&offset=0`
+Lists transactions scoped by account ownership for `ACCOUNT_HOLDER`.
 
-### Idempotency Behavior (FR-15)
-- Repeating a request with the **same `Idempotency-Key` and identical payload** returns the cached response (`200 OK`) with `"isCached": true` and creates no duplicate ledger entries.
-- Reusing the **same `Idempotency-Key` with a different payload or endpoint** returns `422 IDEMPOTENCY_KEY_PAYLOAD_MISMATCH`.
+### `GET /api/transactions/idempotency?limit=20`
+Returns the caller's recent `idempotency_keys` registry (`key`, `request_path`, `status`, `response_code`, `created_at`).
 
 ---
 
-## 6. Ledger Conservation & Audit Trail (FR-17 to FR-21)
+## 6. Ledger Conservation & Audit Trail (FR-14, FR-15, FR-19, FR-21)
 
 ### `GET /api/ledger/conservation`
-Authenticated verification endpoint returning `is_valid`, `ledger_stats` (`total_debits`, `total_credits`, `difference`, `total_entries`), `balance_stats` (`total_customer_balances`, `clearing_vault_balance`, `is_consistent`), and `unbalanced_transactions_count`.
-- **Auth:** Any authenticated role (`ADMIN`, `ACCOUNT_HOLDER`, `AUDITOR`).
+Verifies global double-entry conservation (`total_debits === total_credits` and `total_customer_balances === clearing_vault_balance`).
+- **Auth:** Any authenticated role.
 
 ### `GET /api/ledger/entries?transactionType=&direction=&limit=100`
 Returns raw double-entry ledger lines joined with transactions and accounts.
 - **Auth:** `AUDITOR`, `ADMIN`.
 
-### `GET /api/audit/logs?status=&entityType=&actorId=&limit=100`
-Returns append-only audit trail entries (`SUCCESS`, `FAILURE`, `UNAUTHORIZED`). Protected by DB triggers preventing `UPDATE` and `DELETE`.
+### `GET /api/audit/logs?status=&entityType=&actorId=&action=&search=&fromDate=&toDate=&limit=50&offset=0`
+Searches and paginates append-only `audit_logs` records (protected by SQLite & PostgreSQL immutability triggers).
+- **Auth:** `AUDITOR`, `ADMIN`.
+
+### `GET /api/audit/logs/export?...`
+Streams matching `audit_logs` rows as `text/csv` (`ledgerline-audit-logs.csv`).
 - **Auth:** `AUDITOR`, `ADMIN`.
 
 ---
 
 ## 7. Administration Endpoints (FR-2, FR-7, FR-9)
 
-All `/api/admin/*` endpoints require `role === 'ADMIN'`. Unauthorized access attempts return `403` and record an `UNAUTHORIZED` entry in `audit_logs`.
+All `/api/admin/*` endpoints require `role === 'ADMIN'`.
 
-### `GET /api/admin/users?status=&role=`
-Lists non-system users.
-
-### `POST /api/admin/users`
-Admin-only user provisioning (supports `ADMIN`, `ACCOUNT_HOLDER`, `AUDITOR`, immediately `ACTIVE`).
-- **Body:** `{ "username": "...", "email": "...", "password": "...", "role": "AUDITOR" }`
-
-### `POST /api/admin/users/:id/activate`
-Approves a `PENDING_APPROVAL` user (or re-activates a `DEACTIVATED` user) to `ACTIVE`.
-
-### `POST /api/admin/users/:id/deactivate`
-Deactivates an active user (blocks admin self-deactivation).
-
-### `POST /api/admin/accounts/:id/status`
-Updates an account's operational status (`ACTIVE`, `FROZEN`, `CLOSED`). Rejects modifications to `SYSTEM_CLEARING`. `FROZEN` or `CLOSED` accounts cannot send or receive money (`400 ACCOUNT_NOT_ACTIVE`).
-- **Body:** `{ "status": "FROZEN" }`
-
-### `GET /api/admin/stats`
-Returns `{ "stats": { "users": { total_users, pending_users, active_users }, "accounts": { total_accounts, total_balances }, "transactions": { total_transactions, total_volume }, "audit": { total_audit_entries } } }`.
-
-### `POST /api/admin/reset-seed`
-Clears transactional tables (`idempotency_keys`, `ledger_entries`, `transactions`, `accounts`, `users`) in foreign-key order without mutating `audit_logs`, re-seeds the demo dataset, and appends a `DEMO_DATABASE_RESET` audit record.
+- `GET /api/admin/users?status=&role=` — Lists users including `failed_login_attempts` and `locked_until`.
+- `POST /api/admin/users` — Admin-only provisioning (`ADMIN`, `ACCOUNT_HOLDER`, `AUDITOR`, created `ACTIVE`).
+- `POST /api/admin/users/:id/activate` — Activates a user and clears any failed-login lockout.
+- `POST /api/admin/users/:id/deactivate` — Deactivates a user (blocks admin self-deactivation).
+- `POST /api/admin/accounts/:id/status` — Sets account status (`ACTIVE`, `FROZEN`, `CLOSED`).
+- `GET /api/admin/stats` — System user/account/transaction/audit aggregates.
+- `POST /api/admin/reset-seed` — Resets demo operational tables in FK order while strictly preserving `audit_logs` and appending `DEMO_DATABASE_RESET`.

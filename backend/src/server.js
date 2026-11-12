@@ -1,10 +1,9 @@
 // backend/src/server.js
 const http = require('node:http');
-const url = require('node:url');
 const fs = require('node:fs');
 const path = require('node:path');
 const config = require('./config');
-const { getDatabase } = require('./db/database');
+const { getDatabase, initDatabase } = require('./db/database');
 const { ensureSeeded, resetAndSeedDatabase } = require('./db/seed');
 const { AuthService } = require('./services/authService');
 const { AccountService } = require('./services/accountService');
@@ -13,13 +12,19 @@ const { AuditService } = require('./services/auditService');
 const { AdminService } = require('./services/adminService');
 const { authenticate } = require('./middleware/auth');
 const { RateLimiter } = require('./middleware/rateLimiter');
+const { TelemetryCollector } = require('./middleware/telemetry');
+
+function escapeCsvCell(val) {
+    const s = val === null || val === undefined ? '' : String(val);
+    return `"${s.replace(/"/g, '""')}"`;
+}
 
 function createServer(dbInstance = null, options = {}) {
     const db = dbInstance || getDatabase();
 
-    // Auto-seed empty database on first boot so fresh clones work out of the box
+    let seedPromise = null;
     if (!options.skipAutoSeed) {
-        ensureSeeded(db);
+        seedPromise = ensureSeeded(db, { passwords: options.seedPasswords });
     }
 
     const auditService = new AuditService(db);
@@ -27,40 +32,35 @@ function createServer(dbInstance = null, options = {}) {
     const accountService = new AccountService(db, auditService);
     const ledgerService = new LedgerService(db, auditService);
     const adminService = new AdminService(db, auditService, accountService);
+    const telemetry = options.telemetry || new TelemetryCollector();
 
     const authLimiter = options.authLimiter || new RateLimiter({
         windowMs: config.RATE_LIMIT_WINDOW_MS,
-        max: config.AUTH_RATE_LIMIT_MAX
+        max: config.AUTH_RATE_LIMIT_MAX,
+        prefix: 'auth'
     });
     const apiLimiter = options.apiLimiter || new RateLimiter({
         windowMs: config.RATE_LIMIT_WINDOW_MS,
-        max: config.RATE_LIMIT_MAX_REQUESTS
+        max: config.RATE_LIMIT_MAX_REQUESTS,
+        prefix: 'api'
     });
 
     function getClientIp(req) {
         return req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '127.0.0.1';
     }
 
-    // Helper to send JSON response
     function sendJson(res, statusCode, data) {
-        res.writeHead(statusCode, {
-            'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key',
-            'Cache-Control': 'no-store'
-        });
+        res.writeHead(statusCode, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(data));
     }
 
-    // Helper to check RBAC role and record UNAUTHORIZED access attempts in the audit log
-    function authorizeRole(req, res, ...allowedRoles) {
+    async function authorizeRole(req, res, ...allowedRoles) {
         if (!req.user) {
             sendJson(res, 401, { error: 'UNAUTHORIZED', message: 'Authentication required' });
             return false;
         }
         if (!allowedRoles.includes(req.user.role)) {
-            auditService.record({
+            await auditService.record({
                 actorId: req.user.userId,
                 actorUsername: req.user.username,
                 actorRole: req.user.role,
@@ -79,13 +79,12 @@ function createServer(dbInstance = null, options = {}) {
         return true;
     }
 
-    // Helper to parse JSON body
     function parseBody(req) {
         return new Promise((resolve, reject) => {
             let body = '';
             req.on('data', chunk => {
                 body += chunk;
-                if (body.length > 1e6) { // 1MB limit
+                if (body.length > 1e6) {
                     req.destroy();
                     reject(new Error('PAYLOAD_TOO_LARGE'));
                 }
@@ -94,84 +93,96 @@ function createServer(dbInstance = null, options = {}) {
                 if (!body.trim()) return resolve({});
                 try {
                     resolve(JSON.parse(body));
-                } catch (err) {
+                } catch {
                     reject(new Error('INVALID_JSON'));
                 }
             });
-            req.on('error', reject);
+            req.on('error', err => reject(err));
         });
     }
 
+    const distDir = path.resolve(__dirname, '..', '..', 'frontend', 'dist');
+    const rawFrontendDir = path.resolve(__dirname, '..', '..', 'frontend');
+
+    function getStaticRoot() {
+        if (fs.existsSync(path.join(distDir, 'index.html'))) {
+            return distDir;
+        }
+        return rawFrontendDir;
+    }
+
     const server = http.createServer(async (req, res) => {
-        // Handle CORS preflight
+        if (seedPromise) {
+            await seedPromise;
+            seedPromise = null;
+        }
+
+        telemetry.beginRequest(req, res);
+
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, X-Request-Id');
+
         if (req.method === 'OPTIONS') {
-            res.writeHead(204, {
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-                'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key'
-            });
+            res.writeHead(204);
             res.end();
             return;
         }
 
-        const parsedUrl = url.parse(req.url, true);
+        const parsedUrl = new URL(req.url || '/', 'http://localhost');
         const pathname = parsedUrl.pathname;
-        const query = parsedUrl.query;
+        const query = Object.fromEntries(parsedUrl.searchParams.entries());
         const method = req.method;
         const ipAddress = getClientIp(req);
 
-        // Apply Rate Limiting on API routes (strict on sensitive auth routes, generous on general API)
-        if (pathname.startsWith('/api/')) {
-            const isSensitiveAuthRoute =
-                pathname === '/api/auth/login' ||
-                pathname === '/api/auth/register' ||
-                pathname === '/api/auth/bootstrap';
-
-            if (isSensitiveAuthRoute) {
-                if (!authLimiter.check(req, res)) {
-                    auditService.record({
-                        action: 'RATE_LIMIT_TRIGGERED',
-                        entityType: 'AUTH',
-                        details: { path: pathname },
-                        ipAddress,
-                        status: 'FAILURE'
-                    });
-                    return;
-                }
-            } else if (!apiLimiter.check(req, res)) {
-                return;
-            }
+        // Rate limiting (auth routes have dedicated tighter brute-force limits)
+        if (pathname === '/api/auth/login' || pathname === '/api/auth/register' || pathname === '/api/auth/bootstrap') {
+            if (!(await authLimiter.check(req, res, ipAddress))) return;
+        } else if (pathname.startsWith('/api/')) {
+            if (!(await apiLimiter.check(req, res, ipAddress))) return;
         }
 
         try {
             // ----------------------------------------------------------------
-            // 1. Health & Operations (FR-23)
+            // 1. Health, Readiness & Monitoring (FR-23)
             // ----------------------------------------------------------------
             if (pathname === '/api/health' && method === 'GET') {
                 return sendJson(res, 200, {
                     status: 'UP',
                     timestamp: new Date().toISOString(),
                     service: 'LedgerLine / BalanceVault',
-                    version: '1.0.0'
+                    version: '1.1.0'
                 });
             }
 
             if (pathname === '/api/ready' && method === 'GET') {
-                db.prepare('SELECT 1').get();
+                await db.get('SELECT 1 as ok');
                 return sendJson(res, 200, {
                     status: 'READY',
                     database: 'CONNECTED',
+                    dialect: db.dialect,
+                    rateLimiter: apiLimiter.getBackendMode(),
                     timestamp: new Date().toISOString()
                 });
             }
 
+            if (pathname === '/api/metrics' && method === 'GET') {
+                if (!(await authenticate(req, res, db))) return;
+                if (!(await authorizeRole(req, res, 'ADMIN', 'AUDITOR'))) return;
+
+                return sendJson(res, 200, telemetry.getSnapshot({
+                    dbDialect: db.dialect,
+                    rateLimitBackend: apiLimiter.getBackendMode()
+                }));
+            }
+
             // ----------------------------------------------------------------
-            // 2. Authentication & Bootstrap (FR-1, FR-4, FR-6)
+            // 2. Authentication, Sessions & Bootstrap (FR-1, FR-4, FR-6)
             // ----------------------------------------------------------------
             if (pathname === '/api/auth/register' && method === 'POST') {
                 const body = await parseBody(req);
-                const result = authService.register(body);
-                auditService.record({
+                const result = await authService.register(body);
+                await auditService.record({
                     actorId: result.id,
                     actorUsername: result.username,
                     actorRole: result.role,
@@ -188,8 +199,8 @@ function createServer(dbInstance = null, options = {}) {
             if (pathname === '/api/auth/login' && method === 'POST') {
                 const body = await parseBody(req);
                 try {
-                    const result = authService.login(body);
-                    auditService.record({
+                    const result = await authService.login(body);
+                    await auditService.record({
                         actorId: result.user.id,
                         actorUsername: result.user.username,
                         actorRole: result.user.role,
@@ -201,7 +212,7 @@ function createServer(dbInstance = null, options = {}) {
                     });
                     return sendJson(res, 200, result);
                 } catch (loginErr) {
-                    auditService.record({
+                    await auditService.record({
                         actorUsername: body?.username || 'unknown',
                         action: 'USER_LOGIN_FAILED',
                         entityType: 'AUTH',
@@ -213,17 +224,61 @@ function createServer(dbInstance = null, options = {}) {
                 }
             }
 
+            if (pathname === '/api/auth/logout' && method === 'POST') {
+                if (!(await authenticate(req, res, db))) return;
+                await authService.revokeToken({
+                    jti: req.user.jti,
+                    userId: req.user.userId,
+                    exp: req.user.exp
+                });
+                await auditService.record({
+                    actorId: req.user.userId,
+                    actorUsername: req.user.username,
+                    actorRole: req.user.role,
+                    action: 'USER_LOGOUT',
+                    entityType: 'AUTH',
+                    entityId: req.user.userId,
+                    ipAddress,
+                    status: 'SUCCESS'
+                });
+                return sendJson(res, 200, { message: 'Signed out cleanly.' });
+            }
+
+            if (pathname === '/api/auth/change-password' && method === 'POST') {
+                if (!(await authenticate(req, res, db))) return;
+                const body = await parseBody(req);
+                const result = await authService.changePassword({
+                    userId: req.user.userId,
+                    currentPassword: body.currentPassword,
+                    newPassword: body.newPassword,
+                    currentJti: req.user.jti,
+                    currentExp: req.user.exp
+                });
+                await auditService.record({
+                    actorId: req.user.userId,
+                    actorUsername: req.user.username,
+                    actorRole: req.user.role,
+                    action: 'USER_PASSWORD_CHANGED',
+                    entityType: 'USER',
+                    entityId: req.user.userId,
+                    ipAddress,
+                    status: 'SUCCESS'
+                });
+                return sendJson(res, 200, result);
+            }
+
             if (pathname === '/api/auth/bootstrap-status' && method === 'GET') {
-                const existingAdmin = db.prepare(
-                    "SELECT COUNT(*) as cnt FROM users WHERE role = 'ADMIN' AND id != ?"
-                ).get(config.SYSTEM_USER_ID);
-                return sendJson(res, 200, { needsBootstrap: existingAdmin.cnt === 0 });
+                const existingAdmin = await db.get(
+                    "SELECT COUNT(*) as cnt FROM users WHERE role = 'ADMIN' AND id != ?",
+                    config.SYSTEM_USER_ID
+                );
+                return sendJson(res, 200, { needsBootstrap: Number(existingAdmin.cnt) === 0 });
             }
 
             if (pathname === '/api/auth/bootstrap' && method === 'POST') {
                 const body = await parseBody(req);
-                const result = authService.bootstrapAdmin(body);
-                auditService.record({
+                const result = await authService.bootstrapAdmin(body);
+                await auditService.record({
                     actorId: result.id,
                     actorUsername: result.username,
                     actorRole: 'ADMIN',
@@ -237,8 +292,11 @@ function createServer(dbInstance = null, options = {}) {
             }
 
             if (pathname === '/api/auth/me' && method === 'GET') {
-                if (!authenticate(req, res)) return;
-                const user = db.prepare('SELECT id, username, email, role, status, created_at FROM users WHERE id = ?').get(req.user.userId);
+                if (!(await authenticate(req, res, db))) return;
+                const user = await db.get(
+                    'SELECT id, username, email, role, status, created_at FROM users WHERE id = ?',
+                    req.user.userId
+                );
                 return sendJson(res, 200, { user });
             }
 
@@ -246,95 +304,93 @@ function createServer(dbInstance = null, options = {}) {
             // 3. Accounts (FR-3, FR-9, FR-20)
             // ----------------------------------------------------------------
             if (pathname === '/api/accounts/recipients' && method === 'GET') {
-                if (!authenticate(req, res)) return;
-                const recipients = accountService.listTransferRecipients(query.excludeAccountId || null);
+                if (!(await authenticate(req, res, db))) return;
+                const recipients = await accountService.listTransferRecipients(query.excludeAccountId || null);
                 return sendJson(res, 200, { recipients });
             }
 
             if (pathname === '/api/accounts' && method === 'GET') {
-                if (!authenticate(req, res)) return;
-                const accounts = accountService.getAccountsForUser(req.user);
+                if (!(await authenticate(req, res, db))) return;
+                const accounts = await accountService.getAccountsForUser(req.user);
                 return sendJson(res, 200, { accounts });
             }
 
             if (pathname === '/api/accounts' && method === 'POST') {
-                if (!authenticate(req, res)) return;
-                if (!authorizeRole(req, res, 'ACCOUNT_HOLDER', 'ADMIN')) return;
+                if (!(await authenticate(req, res, db))) return;
+                if (!(await authorizeRole(req, res, 'ACCOUNT_HOLDER', 'ADMIN'))) return;
+
                 const body = await parseBody(req);
-                
-                const ownerId = req.user.role === 'ADMIN' ? (body.ownerId || req.user.userId) : req.user.userId;
-                const account = accountService.createAccount({
-                    ownerId,
+                const targetOwnerId = req.user.role === 'ADMIN' && body.ownerId ? body.ownerId : req.user.userId;
+
+                const account = await accountService.createAccount({
+                    ownerId: targetOwnerId,
                     accountType: body.accountType || 'CHECKING',
                     currency: body.currency || 'USD'
                 });
-
-                auditService.record({
-                    actorId: req.user.userId,
-                    actorUsername: req.user.username,
-                    actorRole: req.user.role,
-                    action: 'ACCOUNT_CREATED',
-                    entityType: 'ACCOUNT',
-                    entityId: account.id,
-                    details: { accountNumber: account.account_number, type: account.account_type },
-                    ipAddress,
-                    status: 'SUCCESS'
-                });
-
                 return sendJson(res, 201, { account });
             }
 
-            // Match /api/accounts/:id/statement
             const statementMatch = pathname.match(/^\/api\/accounts\/([^/]+)\/statement$/);
             if (statementMatch && method === 'GET') {
-                if (!authenticate(req, res)) return;
+                if (!(await authenticate(req, res, db))) return;
                 const accountId = statementMatch[1];
-                const statement = accountService.getAccountStatement(accountId, req.user);
+                const statement = await accountService.getAccountStatement(accountId, req.user, {
+                    transactionType: query.transactionType || null,
+                    fromDate: query.fromDate || null,
+                    toDate: query.toDate || null,
+                    search: query.search || null
+                });
                 return sendJson(res, 200, statement);
             }
 
-            // Match /api/accounts/:id
+            const closeMatch = pathname.match(/^\/api\/accounts\/([^/]+)\/close$/);
+            if (closeMatch && method === 'POST') {
+                if (!(await authenticate(req, res, db))) return;
+                if (!(await authorizeRole(req, res, 'ACCOUNT_HOLDER', 'ADMIN'))) return;
+
+                const body = await parseBody(req);
+                const result = await accountService.closeAccountWithSweep({
+                    accountId: closeMatch[1],
+                    destinationAccountId: body.destinationAccountId || null,
+                    destinationAccountNumber: body.destinationAccountNumber || null,
+                    actor: req.user
+                });
+                return sendJson(res, 200, result);
+            }
+
             const accountMatch = pathname.match(/^\/api\/accounts\/([^/]+)$/);
             if (accountMatch && method === 'GET') {
-                if (!authenticate(req, res)) return;
+                if (!(await authenticate(req, res, db))) return;
                 const accountId = accountMatch[1];
-                const account = accountService.getAccountById(accountId);
+                const account = await accountService.getAccountById(accountId);
                 if (!account) {
-                    return sendJson(res, 404, { error: 'ACCOUNT_NOT_FOUND' });
+                    return sendJson(res, 404, { error: 'ACCOUNT_NOT_FOUND', message: 'Account not found' });
                 }
-                // FR-3: Ownership check
                 if (req.user.role === 'ACCOUNT_HOLDER' && account.owner_id !== req.user.userId) {
-                    auditService.record({
-                        actorId: req.user.userId,
-                        actorUsername: req.user.username,
-                        actorRole: req.user.role,
-                        action: 'UNAUTHORIZED_ACCOUNT_READ',
-                        entityType: 'ACCOUNT',
-                        entityId: accountId,
-                        ipAddress,
-                        status: 'UNAUTHORIZED'
-                    });
-                    return sendJson(res, 403, { error: 'FORBIDDEN', message: 'You can only access your own accounts' });
+                    throw new Error('UNAUTHORIZED_ACCOUNT_ACCESS');
                 }
                 return sendJson(res, 200, { account });
             }
 
             // ----------------------------------------------------------------
-            // 4. Money Movement & Transactions (FR-10, FR-11, FR-12, FR-13, FR-14, FR-16, FR-17, FR-18)
+            // 4. Money Movement & Idempotency (FR-10 to FR-18)
             // ----------------------------------------------------------------
             if (pathname === '/api/transactions/deposit' && method === 'POST') {
-                if (!authenticate(req, res)) return;
-                if (!authorizeRole(req, res, 'ACCOUNT_HOLDER', 'ADMIN')) return;
+                if (!(await authenticate(req, res, db))) return;
+                if (!(await authorizeRole(req, res, 'ACCOUNT_HOLDER', 'ADMIN'))) return;
 
                 const body = await parseBody(req);
                 const idempotencyKey = req.headers['idempotency-key'] || body.idempotencyKey;
                 if (!idempotencyKey) {
-                    return sendJson(res, 400, { error: 'MISSING_IDEMPOTENCY_KEY', message: 'Idempotency-Key header is required' });
+                    return sendJson(res, 400, {
+                        error: 'IDEMPOTENCY_KEY_REQUIRED',
+                        message: 'Header Idempotency-Key is mandatory for deposit requests'
+                    });
                 }
 
-                const result = ledgerService.deposit({
+                const result = await ledgerService.deposit({
                     accountId: body.accountId,
-                    amount: body.amount,
+                    amount: Number(body.amount),
                     idempotencyKey,
                     description: body.description,
                     actor: req.user
@@ -344,18 +400,21 @@ function createServer(dbInstance = null, options = {}) {
             }
 
             if (pathname === '/api/transactions/withdraw' && method === 'POST') {
-                if (!authenticate(req, res)) return;
-                if (!authorizeRole(req, res, 'ACCOUNT_HOLDER', 'ADMIN')) return;
+                if (!(await authenticate(req, res, db))) return;
+                if (!(await authorizeRole(req, res, 'ACCOUNT_HOLDER', 'ADMIN'))) return;
 
                 const body = await parseBody(req);
                 const idempotencyKey = req.headers['idempotency-key'] || body.idempotencyKey;
                 if (!idempotencyKey) {
-                    return sendJson(res, 400, { error: 'MISSING_IDEMPOTENCY_KEY', message: 'Idempotency-Key header is required' });
+                    return sendJson(res, 400, {
+                        error: 'IDEMPOTENCY_KEY_REQUIRED',
+                        message: 'Header Idempotency-Key is mandatory for withdrawal requests'
+                    });
                 }
 
-                const result = ledgerService.withdraw({
+                const result = await ledgerService.withdraw({
                     accountId: body.accountId,
-                    amount: body.amount,
+                    amount: Number(body.amount),
                     idempotencyKey,
                     description: body.description,
                     actor: req.user
@@ -365,20 +424,23 @@ function createServer(dbInstance = null, options = {}) {
             }
 
             if (pathname === '/api/transactions/transfer' && method === 'POST') {
-                if (!authenticate(req, res)) return;
-                if (!authorizeRole(req, res, 'ACCOUNT_HOLDER', 'ADMIN')) return;
+                if (!(await authenticate(req, res, db))) return;
+                if (!(await authorizeRole(req, res, 'ACCOUNT_HOLDER', 'ADMIN'))) return;
 
                 const body = await parseBody(req);
                 const idempotencyKey = req.headers['idempotency-key'] || body.idempotencyKey;
                 if (!idempotencyKey) {
-                    return sendJson(res, 400, { error: 'MISSING_IDEMPOTENCY_KEY', message: 'Idempotency-Key header is required' });
+                    return sendJson(res, 400, {
+                        error: 'IDEMPOTENCY_KEY_REQUIRED',
+                        message: 'Header Idempotency-Key is mandatory for transfer requests'
+                    });
                 }
 
-                const result = ledgerService.transfer({
+                const result = await ledgerService.transfer({
                     sourceAccountId: body.sourceAccountId,
                     destinationAccountId: body.destinationAccountId,
                     destinationAccountNumber: body.destinationAccountNumber,
-                    amount: body.amount,
+                    amount: Number(body.amount),
                     idempotencyKey,
                     description: body.description,
                     actor: req.user
@@ -387,17 +449,27 @@ function createServer(dbInstance = null, options = {}) {
                 return sendJson(res, result.isCached ? 200 : 201, result);
             }
 
+            if (pathname === '/api/transactions/idempotency' && method === 'GET') {
+                if (!(await authenticate(req, res, db))) return;
+                const keys = await ledgerService.getIdempotencyHistory(
+                    req.user.userId,
+                    query.limit ? parseInt(query.limit, 10) : 20
+                );
+                return sendJson(res, 200, { keys });
+            }
+
             if (pathname === '/api/transactions' && method === 'GET') {
-                if (!authenticate(req, res)) return;
+                if (!(await authenticate(req, res, db))) return;
                 const limit = query.limit ? parseInt(query.limit, 10) : 50;
                 const offset = query.offset ? parseInt(query.offset, 10) : 0;
                 const accountId = query.accountId || null;
 
-                const transactions = ledgerService.getTransactions({
+                const transactions = await ledgerService.getTransactions({
                     limit,
                     offset,
                     accountId,
-                    requestingUser: req.user
+                    requestingUser: req.user,
+                    type: query.type || null
                 });
                 return sendJson(res, 200, { transactions });
             }
@@ -406,16 +478,16 @@ function createServer(dbInstance = null, options = {}) {
             // 5. Ledger & Conservation Verification (FR-14, FR-15)
             // ----------------------------------------------------------------
             if (pathname === '/api/ledger/conservation' && method === 'GET') {
-                if (!authenticate(req, res)) return;
-                const conservation = ledgerService.verifyConservation();
+                if (!(await authenticate(req, res, db))) return;
+                const conservation = await ledgerService.verifyConservation();
                 return sendJson(res, 200, conservation);
             }
 
             if (pathname === '/api/ledger/entries' && method === 'GET') {
-                if (!authenticate(req, res)) return;
-                if (!authorizeRole(req, res, 'AUDITOR', 'ADMIN')) return;
+                if (!(await authenticate(req, res, db))) return;
+                if (!(await authorizeRole(req, res, 'AUDITOR', 'ADMIN'))) return;
 
-                const limit = query.limit ? parseInt(query.limit, 10) : 100;
+                const limit = Math.min(Math.max(parseInt(query.limit, 10) || 100, 1), 500);
                 let sql = `
                     SELECT le.id, le.transaction_id, le.account_id, le.direction, le.amount, le.created_at,
                            a.account_number, a.account_type, u.username as owner_username,
@@ -435,27 +507,69 @@ function createServer(dbInstance = null, options = {}) {
                     sql += ' AND le.direction = ?';
                     params.push(query.direction);
                 }
-                sql += ' ORDER BY le.created_at DESC, le.rowid DESC LIMIT ?';
+                sql += ` ORDER BY ${db.orderByInsertion('le', 'DESC')} LIMIT ?`;
                 params.push(limit);
 
-                const entries = db.prepare(sql).all(...params);
+                const entries = (await db.all(sql, ...params)).map(e => ({ ...e, amount: Number(e.amount) }));
                 return sendJson(res, 200, { entries });
             }
 
             // ----------------------------------------------------------------
-            // 6. Audit Logs (FR-19, FR-21)
+            // 6. Audit Logs & CSV Export (FR-19, FR-21)
             // ----------------------------------------------------------------
+            if (pathname === '/api/audit/logs/export' && method === 'GET') {
+                if (!(await authenticate(req, res, db))) return;
+                if (!(await authorizeRole(req, res, 'AUDITOR', 'ADMIN'))) return;
+
+                const auditData = await auditService.getLogs({
+                    limit: 1000,
+                    offset: 0,
+                    entityType: query.entityType || null,
+                    actorId: query.actorId || null,
+                    status: query.status || null,
+                    action: query.action || null,
+                    search: query.search || null,
+                    fromDate: query.fromDate || null,
+                    toDate: query.toDate || null
+                });
+
+                const header = ['id', 'created_at', 'actor_username', 'actor_role', 'action', 'entity_type', 'entity_id', 'status', 'ip_address', 'details'];
+                const rows = auditData.logs.map(l => [
+                    escapeCsvCell(l.id),
+                    escapeCsvCell(l.created_at),
+                    escapeCsvCell(l.actor_username || 'system'),
+                    escapeCsvCell(l.actor_role || ''),
+                    escapeCsvCell(l.action),
+                    escapeCsvCell(l.entity_type),
+                    escapeCsvCell(l.entity_id || ''),
+                    escapeCsvCell(l.status),
+                    escapeCsvCell(l.ip_address || ''),
+                    escapeCsvCell(typeof l.details === 'object' ? JSON.stringify(l.details) : (l.details || ''))
+                ].join(','));
+
+                res.writeHead(200, {
+                    'Content-Type': 'text/csv; charset=utf-8',
+                    'Content-Disposition': 'attachment; filename="ledgerline-audit-logs.csv"'
+                });
+                res.end([header.join(','), ...rows].join('\n'));
+                return;
+            }
+
             if (pathname === '/api/audit/logs' && method === 'GET') {
-                if (!authenticate(req, res)) return;
-                if (!authorizeRole(req, res, 'AUDITOR', 'ADMIN')) return;
+                if (!(await authenticate(req, res, db))) return;
+                if (!(await authorizeRole(req, res, 'AUDITOR', 'ADMIN'))) return;
 
-                const limit = query.limit ? parseInt(query.limit, 10) : 50;
-                const offset = query.offset ? parseInt(query.offset, 10) : 0;
-                const entityType = query.entityType || null;
-                const actorId = query.actorId || null;
-                const status = query.status || null;
-
-                const auditData = auditService.getLogs({ limit, offset, entityType, actorId, status });
+                const auditData = await auditService.getLogs({
+                    limit: query.limit ? parseInt(query.limit, 10) : 50,
+                    offset: query.offset ? parseInt(query.offset, 10) : 0,
+                    entityType: query.entityType || null,
+                    actorId: query.actorId || null,
+                    status: query.status || null,
+                    action: query.action || null,
+                    search: query.search || null,
+                    fromDate: query.fromDate || null,
+                    toDate: query.toDate || null
+                });
                 return sendJson(res, 200, auditData);
             }
 
@@ -463,10 +577,10 @@ function createServer(dbInstance = null, options = {}) {
             // 7. Admin User & Account Management (FR-7, FR-8, FR-9)
             // ----------------------------------------------------------------
             if (pathname === '/api/admin/users' && method === 'GET') {
-                if (!authenticate(req, res)) return;
-                if (!authorizeRole(req, res, 'ADMIN')) return;
+                if (!(await authenticate(req, res, db))) return;
+                if (!(await authorizeRole(req, res, 'ADMIN'))) return;
 
-                const users = adminService.listUsers({
+                const users = await adminService.listUsers({
                     status: query.status || null,
                     role: query.role || null
                 });
@@ -474,85 +588,94 @@ function createServer(dbInstance = null, options = {}) {
             }
 
             if (pathname === '/api/admin/users' && method === 'POST') {
-                if (!authenticate(req, res)) return;
-                if (!authorizeRole(req, res, 'ADMIN')) return;
+                if (!(await authenticate(req, res, db))) return;
+                if (!(await authorizeRole(req, res, 'ADMIN'))) return;
 
                 const body = await parseBody(req);
-                const result = adminService.createUser(body, req.user);
+                const result = await adminService.createUser(body, req.user);
                 return sendJson(res, 201, result);
             }
 
             const activateMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/activate$/);
             if (activateMatch && method === 'POST') {
-                if (!authenticate(req, res)) return;
-                if (!authorizeRole(req, res, 'ADMIN')) return;
+                if (!(await authenticate(req, res, db))) return;
+                if (!(await authorizeRole(req, res, 'ADMIN'))) return;
 
-                const targetUserId = activateMatch[1];
-                const result = adminService.activateUser(targetUserId, req.user);
+                const result = await adminService.activateUser(activateMatch[1], req.user);
                 return sendJson(res, 200, result);
             }
 
             const deactivateMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/deactivate$/);
             if (deactivateMatch && method === 'POST') {
-                if (!authenticate(req, res)) return;
-                if (!authorizeRole(req, res, 'ADMIN')) return;
+                if (!(await authenticate(req, res, db))) return;
+                if (!(await authorizeRole(req, res, 'ADMIN'))) return;
 
-                const targetUserId = deactivateMatch[1];
-                const result = adminService.deactivateUser(targetUserId, req.user);
+                const result = await adminService.deactivateUser(deactivateMatch[1], req.user);
                 return sendJson(res, 200, result);
             }
 
             const accountStatusMatch = pathname.match(/^\/api\/admin\/accounts\/([^/]+)\/status$/);
             if (accountStatusMatch && method === 'POST') {
-                if (!authenticate(req, res)) return;
-                if (!authorizeRole(req, res, 'ADMIN')) return;
+                if (!(await authenticate(req, res, db))) return;
+                if (!(await authorizeRole(req, res, 'ADMIN'))) return;
 
-                const accountId = accountStatusMatch[1];
                 const body = await parseBody(req);
-                const account = accountService.updateAccountStatus(accountId, body.status, req.user);
+                const account = await accountService.updateAccountStatus(accountStatusMatch[1], body.status, req.user);
                 return sendJson(res, 200, { account });
             }
 
             if (pathname === '/api/admin/stats' && method === 'GET') {
-                if (!authenticate(req, res)) return;
-                if (!authorizeRole(req, res, 'ADMIN')) return;
+                if (!(await authenticate(req, res, db))) return;
+                if (!(await authorizeRole(req, res, 'ADMIN'))) return;
 
-                const stats = adminService.getSystemStats();
+                const stats = await adminService.getSystemStats();
                 return sendJson(res, 200, { stats });
             }
 
             if (pathname === '/api/admin/reset-seed' && method === 'POST') {
-                if (!authenticate(req, res)) return;
-                if (!authorizeRole(req, res, 'ADMIN')) return;
+                if (!(await authenticate(req, res, db))) return;
+                if (!(await authorizeRole(req, res, 'ADMIN'))) return;
 
-                resetAndSeedDatabase(db, req.user);
-                return sendJson(res, 200, { message: 'Demo balances and users reset to baseline; immutable audit trail preserved.' });
+                await resetAndSeedDatabase(db, req.user, { passwords: options.seedPasswords });
+                return sendJson(res, 200, {
+                    message: 'Demo balances and users reset to baseline; immutable audit trail preserved.'
+                });
             }
 
             // ----------------------------------------------------------------
-            // 8. Static Frontend Serving (FR-22) with path traversal guard
+            // 8. Static Frontend Hosting (React dist build or fallback frontend)
             // ----------------------------------------------------------------
-            const publicDir = path.resolve(__dirname, '..', '..', 'frontend');
-            const requestedRel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
-            const filePath = path.resolve(publicDir, requestedRel);
+            if (!pathname.startsWith('/api/')) {
+                const staticRoot = getStaticRoot();
+                const cleanPath = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
+                let filePath = path.resolve(staticRoot, cleanPath);
 
-            if (filePath.startsWith(publicDir) && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-                const ext = path.extname(filePath).toLowerCase();
-                const mimeTypes = {
-                    '.html': 'text/html',
-                    '.js': 'text/javascript',
-                    '.css': 'text/css',
-                    '.json': 'application/json',
-                    '.png': 'image/png',
-                    '.svg': 'image/svg+xml'
-                };
-                const contentType = mimeTypes[ext] || 'application/octet-stream';
-                res.writeHead(200, { 'Content-Type': contentType });
-                fs.createReadStream(filePath).pipe(res);
-                return;
+                if (filePath !== staticRoot && !filePath.startsWith(staticRoot + path.sep)) {
+                    return sendJson(res, 403, { error: 'FORBIDDEN_PATH', message: 'Invalid static path' });
+                }
+
+                // SPA fallback for client routes (e.g. /login, /admin, /auditor)
+                if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+                    filePath = path.join(staticRoot, 'index.html');
+                }
+
+                if (fs.existsSync(filePath)) {
+                    const ext = path.extname(filePath);
+                    const mimeTypes = {
+                        '.html': 'text/html; charset=utf-8',
+                        '.js': 'application/javascript; charset=utf-8',
+                        '.css': 'text/css; charset=utf-8',
+                        '.json': 'application/json',
+                        '.png': 'image/png',
+                        '.svg': 'image/svg+xml'
+                    };
+                    const contentType = mimeTypes[ext] || 'application/octet-stream';
+                    res.writeHead(200, { 'Content-Type': contentType });
+                    fs.createReadStream(filePath).pipe(res);
+                    return;
+                }
             }
 
-            // Fallback 404
             return sendJson(res, 404, {
                 error: 'NOT_FOUND',
                 message: `Route '${method} ${pathname}' not found`
@@ -560,7 +683,7 @@ function createServer(dbInstance = null, options = {}) {
 
         } catch (err) {
             if (err.message === 'UNAUTHORIZED_ACCOUNT_ACCESS') {
-                auditService.record({
+                await auditService.record({
                     actorId: req.user?.userId || null,
                     actorUsername: req.user?.username || null,
                     actorRole: req.user?.role || null,
@@ -585,11 +708,15 @@ function createServer(dbInstance = null, options = {}) {
                 'MISSING_REQUIRED_PARAMETERS': 400,
                 'CANNOT_TRANSFER_TO_SAME_ACCOUNT': 400,
                 'CANNOT_CLOSE_ACCOUNT_WITH_NONZERO_BALANCE': 400,
+                'SWEEP_DESTINATION_REQUIRED': 400,
+                'ACCOUNT_ALREADY_CLOSED': 400,
                 'CANNOT_DEACTIVATE_OWN_ADMIN_ACCOUNT': 400,
                 'INSUFFICIENT_FUNDS': 400,
                 'ACCOUNT_NOT_ACTIVE': 400,
                 'USER_NOT_ACTIVE': 400,
                 'INVALID_CREDENTIALS': 401,
+                'INVALID_CURRENT_PASSWORD': 401,
+                'TOKEN_REVOKED': 401,
                 'ACCOUNT_PENDING_APPROVAL': 403,
                 'ACCOUNT_DEACTIVATED': 403,
                 'UNAUTHORIZED_ACCOUNT_ACCESS': 403,
@@ -604,7 +731,8 @@ function createServer(dbInstance = null, options = {}) {
                 'USER_ALREADY_EXISTS': 409,
                 'ADMIN_ALREADY_BOOTSTRAPPED': 409,
                 'CONCURRENT_TRANSACTION_IN_PROGRESS': 409,
-                'IDEMPOTENCY_KEY_PAYLOAD_MISMATCH': 422
+                'IDEMPOTENCY_KEY_PAYLOAD_MISMATCH': 422,
+                'ACCOUNT_TEMPORARILY_LOCKED': 429
             };
 
             const statusCode = statusMap[err.message] || 500;
@@ -621,16 +749,28 @@ function createServer(dbInstance = null, options = {}) {
     return server;
 }
 
-if (require.main === module) {
-    const server = createServer();
+async function startServer() {
+    const db = await initDatabase();
+    await ensureSeeded(db);
+    const server = createServer(db, { skipAutoSeed: true });
     server.listen(config.PORT, () => {
-        console.log(`====================================================`);
-        console.log(` LedgerLine / BalanceVault Core API Running`);
-        console.log(` Port:    http://localhost:${config.PORT}`);
-        console.log(` Health:  http://localhost:${config.PORT}/api/health`);
-        console.log(` Ready:   http://localhost:${config.PORT}/api/ready`);
-        console.log(`====================================================`);
+        console.log('====================================================');
+        console.log(' LedgerLine / BalanceVault Core API Running');
+        console.log(` DB Dialect:   ${db.dialect}`);
+        console.log(` Rate Limiter: ${config.REDIS_URL ? 'redis (+ memory fallback)' : 'in-memory'}`);
+        console.log(` Port:         http://localhost:${config.PORT}`);
+        console.log(` Health:       http://localhost:${config.PORT}/api/health`);
+        console.log(` Ready:        http://localhost:${config.PORT}/api/ready`);
+        console.log('====================================================');
+    });
+    return server;
+}
+
+if (require.main === module) {
+    startServer().catch(err => {
+        console.error('Failed to start server:', err);
+        process.exit(1);
     });
 }
 
-module.exports = { createServer };
+module.exports = { createServer, startServer };

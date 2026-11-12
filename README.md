@@ -3,7 +3,7 @@
 [![Double-Entry Invariance](https://img.shields.io/badge/Double--Entry-Zero--Sum%20Conserved-emerald?style=for-the-badge&logo=cashapp)](https://github.com/Harshagudipati/ledgerline)
 [![Concurrency](https://img.shields.io/badge/Concurrency%20Test-100%20Parallel%20Safe-blue?style=for-the-badge&logo=lightning)](https://github.com/Harshagudipati/ledgerline)
 [![Audit Immutability](https://img.shields.io/badge/Audit%20Trail-Append--Only%20Protected-indigo?style=for-the-badge&logo=shield)](https://github.com/Harshagudipati/ledgerline)
-[![Tests](https://img.shields.io/badge/Automated%20Tests-6%2F6%20Passed-green?style=for-the-badge&logo=checkmarx)](https://github.com/Harshagudipati/ledgerline)
+[![Tests](https://img.shields.io/badge/Automated%20Tests-7%2F7%20Passed-green?style=for-the-badge&logo=checkmarx)](https://github.com/Harshagudipati/ledgerline)
 
 **Event:** Snovasys Fresher Hiring Challenge 2026 (VVIT)  
 **Author:** Harsha Gudipati ([@Harshagudipati](https://github.com/Harshagudipati))  
@@ -13,16 +13,13 @@
 
 ## 📖 Executive Summary
 
-**LedgerLine** is a money-movement system built around a mathematically provable, double-entry general ledger. Every financial transaction produces balanced debit and credit entries ($\sum \text{Debits} = \sum \text{Credits}$), preventing arbitrary balance inflation or phantom funds.
+**LedgerLine** is a money-movement engine built around a mathematically provable, double-entry general ledger. Every financial transaction produces balanced debit and credit entries ($\sum \text{Debits} = \sum \text{Credits}$) with integer-cent storage (`100` = `$1.00`), preventing arbitrary balance inflation or floating-point drift.
 
-**BalanceVault** extends the core engine with enterprise account management:
-- Multi-role Role-Based Access Control (**Administrator**, **Account Holder**, **Auditor**)
-- Strict account-level ownership checks preventing cross-account theft
-- User onboarding workflows (self-registration $\to$ administrator review $\to$ activation)
-- Token-bucket rate limiting on sensitive routes
-- Append-only, tamper-proof audit trail guarded by database triggers
-- Idempotency middleware guaranteeing at-most-once execution for mutating requests
-- Transactional row-level locking protecting against race conditions and negative balances under parallel load
+**BalanceVault** adds production enterprise governance:
+- **Modular React + Vite Frontend** with strict login gate, role-isolated workspaces (**Account Holder**, **Administrator**, **Auditor**), First-Admin Bootstrap wizard, and self-service password rotation
+- **Server-Side Session Revocation & Lockout:** JWT `jti` blocklist (`revoked_tokens`) on logout/password change plus automated failed-login lockout (`MAX_FAILED_LOGINS`)
+- **Dual Database & Limiter Adapters:** Zero-dependency **SQLite WAL** + in-memory sliding-window defaults for local/test speed, seamlessly switchable to **PostgreSQL (`DATABASE_URL` + `FOR UPDATE` locking + least-privilege roles)** and **Redis (`REDIS_URL` pure-Node RESP2 sliding window)**
+- **Observability & Compliance:** Structured JSON logs, `X-Request-Id` correlation headers, `/api/metrics` runtime telemetry, filtered statements, atomic account close with balance sweep, and CSV audit export
 
 ---
 
@@ -30,16 +27,16 @@
 
 ```
                             ┌────────────────────────────────┐
-                            │    Modern Responsive Web UI    │
-                            │  (Holder, Admin, Auditor Views)│
+                            │   React 18 + Vite Web Console  │
+                            │ (Auth, Holder, Admin, Auditor) │
                             └───────────────┬────────────────┘
-                                            │ HTTP (REST + JWT)
+                                            │ HTTP (REST + JWT + Idempotency-Key)
                                             ▼
                        ┌──────────────────────────────────────────┐
-                       │           HTTP / API Engine              │
-                       │  - Rate Limiter (Token Bucket)           │
-                       │  - JWT Authentication & RBAC             │
-                       │  - Idempotency Key Interceptor           │
+                       │           Node.js API & Telemetry        │
+                       │  - TelemetryCollector & X-Request-Id     │
+                       │  - RateLimiter (Redis RESP2 / Memory)    │
+                       │  - JWT jti Revocation & Lockout Guards   │
                        └────────────────────┬─────────────────────┘
                                             │
               ┌─────────────────────────────┼─────────────────────────────┐
@@ -48,134 +45,65 @@
    ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐
    │    Account Service   │      │    Ledger Engine     │      │    Audit Service     │
    │  - Ownership Checks  │      │  - Double-Entry D/C  │      │  - Append-Only Log   │
-   │  - Account Lifecycles│      │  - Concurrency Lock  │      │  - Non-Repudiation   │
+   │  - Close & Sweep     │      │  - Idempotency Hash  │      │  - CSV Export        │
    └──────────┬───────────┘      └──────────┬───────────┘      └──────────┬───────────┘
               │                             │                             │
               └─────────────────────────────┼─────────────────────────────┘
                                             │
                                             ▼
                        ┌──────────────────────────────────────────┐
-                       │          ACID Storage Layer              │
-                       │  - BEGIN IMMEDIATE / Serialized Locks    │
+                       │    SQLite WAL / PostgreSQL Adapter Layer │
+                       │  - Exclusive Locks / SELECT FOR UPDATE   │
                        │  - CHECK (balance >= 0) Constraint       │
                        │  - Immutability Database Triggers        │
                        └──────────────────────────────────────────┘
 ```
 
-Detailed architectural diagrams and mathematical formulations can be found in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), REST endpoints in [docs/API.md](docs/API.md), and production deployment / PostgreSQL instructions in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/API.md](docs/API.md), [docs/DEMO_GUIDE.md](docs/DEMO_GUIDE.md), and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ---
 
-## 🎯 Verification of PRD Section 11 Success Criteria
+## 🎯 Verification Coverage (7/7 Suites Passing)
 
-All claims specified in the Product Requirements Document are backed by automated tests:
-
-| Claim / Success Criterion | Mechanism | Automated Test | Status |
-|---|---|---|:---:|
-| **100 Parallel Withdrawals never overdraw** | `BEGIN IMMEDIATE` / row-level transactional locking | [`backend/tests/concurrency.test.js`](backend/tests/concurrency.test.js) | ✅ **PASS** |
-| **Replaying Idempotency Key never pays twice** | Idempotency registry + request parameter SHA-256 hash | [`backend/tests/idempotency.test.js`](backend/tests/idempotency.test.js) | ✅ **PASS** |
-| **Ledger entries always sum to zero** | Balanced debit/credit double-entry assertion on each transaction | [`backend/tests/ledger.test.js`](backend/tests/ledger.test.js) | ✅ **PASS** |
-| **Account Holder cannot access another holder's funds** | Enforced account-level ownership checks (`owner_id === user.id`) | [`backend/tests/security.test.js`](backend/tests/security.test.js) | ✅ **PASS** |
-| **Audit entries cannot be modified or deleted** | SQLite `BEFORE UPDATE` & `BEFORE DELETE` triggers abort tampering | [`backend/tests/audit.test.js`](backend/tests/audit.test.js) | ✅ **PASS** |
-| **End-to-End HTTP API, Freeze/Close & Rate Limits** | Full REST routing, header idempotency, account freeze & HTTP 429 | [`backend/tests/http.e2e.test.js`](backend/tests/http.e2e.test.js) | ✅ **PASS** |
+| Verification Suite | What It Proves | Test File |
+|---|---|---|
+| **1. Concurrency Protection** | 100 parallel \$10 withdrawals on \$100 account allow exactly 10, zero overdrafts | [`backend/tests/concurrency.test.js`](backend/tests/concurrency.test.js) |
+| **2. Idempotency Protection** | Exact replay serves cached response; tampered payload rejected (`422`) | [`backend/tests/idempotency.test.js`](backend/tests/idempotency.test.js) |
+| **3. Double-Entry Conservation** | Every transaction balances; `total_debits === total_credits`; statement reconciliation | [`backend/tests/ledger.test.js`](backend/tests/ledger.test.js) |
+| **4. Security & RBAC** | Cross-account access blocked; pending login blocked; admin activation/deactivation | [`backend/tests/security.test.js`](backend/tests/security.test.js) |
+| **5. Audit Immutability** | Database triggers abort direct `UPDATE` and `DELETE` on `audit_logs` | [`backend/tests/audit.test.js`](backend/tests/audit.test.js) |
+| **6. HTTP E2E & Rate Limit** | Health/readiness, bootstrap wizard, recipients privacy, account freeze, `429` limits | [`backend/tests/http.e2e.test.js`](backend/tests/http.e2e.test.js) |
+| **7. Security & Operations v1.1** | `logout` token revocation, password rotation, 5-attempt lockout, close sweep, `/api/metrics`, CSV export, migrations | [`backend/tests/improvements.test.js`](backend/tests/improvements.test.js) |
 
 ---
 
 ## 🚀 Quick Start Guide
 
 ### Prerequisites
-- **Node.js**: v20+, v22+, or v24+ (zero third-party dependencies required!)
+- **Node.js**: v22+ or v24+ (uses built-in `node:sqlite`, `node:crypto`, `node:net`)
 
-### 1. Clone & Seed Database
-*(Optional — `server.js` also auto-seeds an empty database on first boot!)*
+### 1. Clone, Configure & Build Frontend
 ```bash
 git clone https://github.com/Harshagudipati/ledgerline.git
 cd ledgerline
-node backend/src/db/seed.js
+cp .env.example .env        # Optional: configure custom ports/passwords/PG/Redis
+npm run setup:frontend
+npm run build
 ```
 
-### 2. Run All Automated Test Suites
+### 2. Run Migrations, Seed & Automated Verification
 ```bash
-npm test
+npm run migrate
+npm run seed                # Prints generated or .env demo credentials
+npm test                    # Runs all 7 test suites
 ```
 
-Output:
-```
-╔══════════════════════════════════════════════════════════════╗
-║       LEDGERLINE / BALANCEVAULT AUTOMATED TEST SUITE        ║
-║    Snovasys Fresher Hiring Challenge 2026 Verification       ║
-╚══════════════════════════════════════════════════════════════╝
-
-======================================================
- TEST SUITE 1: Concurrency Protection (100 Parallel Requests)
-======================================================
-⚡ Dispatching 100 simultaneous parallel withdrawals of $10...
-Results: 10 Succeeded, 90 Failed (90 INSUFFICIENT_FUNDS)
-Final account balance: $0
-✓ PASS: Concurrency Protection prevents race conditions & negative balances!
-
-======================================================
- TEST SUITE 2: Idempotency Protection
-======================================================
-✓ First transfer completed: Tx ID = tx_...
-✓ Replay safely returned cached response. No second transaction created!
-✓ Tampered payload with reused key successfully rejected: IDEMPOTENCY_KEY_PAYLOAD_MISMATCH
-✓ PASS: Idempotency strictly guarantees at-most-once execution!
-
-======================================================
- TEST SUITE 3: Double-Entry Ledger & Conservation
-======================================================
-✓ Every transaction in ledger has Debits = Credits (Zero-Sum Invariance)
-✓ PASS: Double-Entry Ledger and System-Wide Conservation 100% verified!
-
-======================================================
- TEST SUITE 4: Security, RBAC & Ownership Protection
-======================================================
-✓ Unauthorized cross-account withdrawal blocked: UNAUTHORIZED_ACCOUNT_ACCESS
-✓ Charlie successfully activated with initial account ACC-...
-✓ PASS: Security, RBAC & Ownership checks 100% verified!
-
-======================================================
- TEST SUITE 5: Append-Only Audit Trail & Immutability
-======================================================
-✓ Database trigger successfully aborted UPDATE attempt
-✓ Database trigger successfully aborted DELETE attempt
-✓ PASS: Audit trail is provably immutable and tamper-proof!
-
-======================================================
- TEST SUITE 6: End-to-End HTTP API, RBAC, Freeze & Rate Limit
-======================================================
-✓ 1. /api/health, /api/ready & auto-seed on empty DB verified
-✓ 2. Public registration restricted to ACCOUNT_HOLDER + admin onboarding verified
-✓ 3. Recipients privacy, Deposit replay, Account-number Transfer & Withdraw verified
-✓ 4. FR-3 ownership enforcement + FR-9 FROZEN account blocking verified
-✓ 5. RBAC/Failed-login audit records & audit-preserving reset-seed verified
-✓ 6. HTTP 429 auth rate limit + Retry-After headers verified
-✓ PASS: All HTTP End-to-End API, Security, Freeze & Rate Limit checks passed!
-
-======================================================
- SUMMARY: 6 Passed, 0 Failed
-======================================================
-🎉 ALL 6 TEST SUITES PASSED! ALL SUCCESS CRITERIA MET.
-```
-
-### 3. Start Web Dashboard
+### 3. Start Application
 ```bash
-node backend/src/server.js
+npm start
+# Open http://localhost:8080
 ```
-Open **[http://localhost:8080](http://localhost:8080)** in your browser.
-
----
-
-## 👥 Demo Personas
-
-| Username | Password | Role | Description |
-|---|---|---|---|
-| `alice` | `AlicePassword123!` | `ACCOUNT_HOLDER` | Pre-funded with \$1,000.00 Checking Account |
-| `bob` | `BobPassword123!` | `ACCOUNT_HOLDER` | Pre-funded with \$500.00 Checking Account |
-| `admin` | `AdminPassword123!` | `ADMIN` | Platform operator; user management & onboarding |
-| `auditor` | `AuditorPassword123!` | `AUDITOR` | Read-only compliance; inspects ledger and audit trail |
-| `charlie` | `CharliePassword123!` | `ACCOUNT_HOLDER` | Starts in `PENDING_APPROVAL` to demo onboarding |
+*(Optional Vite dev mode with hot reload: run `npm start` + `npm run dev:frontend` in two terminals and open `http://localhost:5173`.)*
 
 ---
 
@@ -183,53 +111,43 @@ Open **[http://localhost:8080](http://localhost:8080)** in your browser.
 
 ```
 ledgerline/
-├── PRD.md                         # Product Requirements Document
-├── README.md                      # Primary project documentation & verification
-├── Dockerfile                     # Production container definition (Node 24 LTS)
-├── .dockerignore                  # Docker build exclusions
-├── package.json                   # Project configuration & test scripts
-├── .gitignore                     # Git ignore rules
-├── docs/
-│   ├── API.md                     # REST API endpoint specification
-│   ├── ARCHITECTURE.md            # System architecture & math invariants
-│   ├── DEMO_GUIDE.md              # Evaluator walkthrough guide
-│   └── DEPLOYMENT.md              # Docker, Render, Railway, Fly.io & PostgreSQL guide
+├── .env.example                   # Environment template (zero secrets committed)
+├── .github/workflows/ci.yml       # GitHub Actions CI (Node 22 & 24 build + 7 suites)
+├── Dockerfile                     # Multi-stage React Vite + Node 24 production build
+├── package.json                   # Root scripts (start, migrate, seed, build, test)
 ├── backend/
 │   ├── src/
-│   │   ├── config.js              # Application configuration
-│   │   ├── server.js              # HTTP server & REST API router
+│   │   ├── config.js              # Lightweight .env loader & fail-fast prod secret check
+│   │   ├── server.js              # HTTP API router, metrics, CSV export & SPA static host
 │   │   ├── db/
-│   │   │   ├── schema.sql         # SQLite DDL, constraints & triggers
-│   │   │   ├── schema.postgres.sql# Production PostgreSQL DDL & PL/pgSQL triggers
-│   │   │   ├── database.js        # SQLite connection & transaction management
-│   │   │   └── seed.js            # Initial demo seed & audit-safe reset logic
+│   │   │   ├── database.js        # Unified SqliteAdapter & PgAdapter transaction layer
+│   │   │   ├── migrate.js         # Idempotent migration runner (schema_migrations)
+│   │   │   ├── schema.sql         # SQLite DDL, constraints & immutability triggers
+│   │   │   ├── schema.postgres.sql# PostgreSQL DDL & PL/pgSQL triggers
+│   │   │   ├── postgresRoles.sql  # Least-privilege PG roles & bootstrap function
+│   │   │   └── seed.js            # Env-driven / random-password seed & audit-safe reset
 │   │   ├── middleware/
-│   │   │   ├── auth.js            # JWT verification & RBAC enforcement
-│   │   │   └── rateLimiter.js     # Split auth/API token-bucket rate limiters
+│   │   │   ├── auth.js            # Async JWT verification & revoked_tokens check
+│   │   │   ├── rateLimiter.js     # Pure-Node Redis RESP2 sliding window + memory fallback
+│   │   │   └── telemetry.js       # X-Request-Id, structured JSON logs & /api/metrics
 │   │   └── services/
-│   │       ├── authService.js     # Password hashing, JWT tokens, bootstrap
-│   │       ├── accountService.js  # Account creation, recipients, freeze/close, statements
-│   │       ├── ledgerService.js   # Double-entry, idempotency, concurrency
-│   │       ├── auditService.js    # Append-only audit trail
-│   │       └── adminService.js    # User provisioning, approvals & stats
-│   └── tests/
-│       ├── concurrency.test.js    # 100 parallel withdrawals test
-│       ├── idempotency.test.js    # Idempotency key replay test
-│       ├── ledger.test.js         # Double-entry zero-sum & conservation test
-│       ├── security.test.js       # Cross-account & RBAC security test
-│       ├── audit.test.js          # Database trigger immutability test
-│       ├── http.e2e.test.js       # End-to-end HTTP API, freeze & rate-limit test
-│       └── runTests.js            # Master test runner
-├── frontend/
-│   ├── index.html                 # Single Page Application Dashboard
-│   └── app.js                     # Client-side API integration & stress test widget
-└── docs/
-    ├── ARCHITECTURE.md            # In-depth architectural & mathematical proof
-    └── DEMO_GUIDE.md              # Evaluator & judge step-by-step walkthrough
+│   │       ├── authService.js     # Register, login lockout, logout revoke, password rotation
+│   │       ├── accountService.js  # Ownership isolation, filtered statements, close sweep
+│   │       ├── ledgerService.js   # Double-entry, idempotency registry, conservation proof
+│   │       ├── auditService.js    # Append-only search/filter queries & recording
+│   │       └── adminService.js    # Provisioning, unlock/activate, stats
+│   └── tests/                     # 7 automated verification suites + testFixtures.js
+├── frontend/                      # Modular React 18 + Vite application
+│   ├── index.html
+│   ├── vite.config.js
+│   └── src/
+│       ├── api/client.js          # Fetch client, integer cents helpers & CSV downloader
+│       ├── components/            # ToastContainer & ChangePasswordModal
+│       └── pages/                 # AuthPage, HolderDashboard, AdminDashboard, AuditorDashboard
+└── docs/                          # API.md, ARCHITECTURE.md, DEMO_GUIDE.md, DEPLOYMENT.md
 ```
 
 ---
 
 ## 📜 License
 This project is licensed under the MIT License.
-

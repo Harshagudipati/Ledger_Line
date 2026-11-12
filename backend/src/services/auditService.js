@@ -9,7 +9,7 @@ class AuditService {
     /**
      * Record an append-only audit event.
      */
-    record({
+    async record({
         actorId = null,
         actorUsername = null,
         actorRole = null,
@@ -21,71 +21,94 @@ class AuditService {
         status = 'SUCCESS'
     }) {
         const id = 'aud_' + crypto.randomUUID();
-        const detailsString = typeof details === 'object' && details !== null 
-            ? JSON.stringify(details) 
+        const detailsString = typeof details === 'object' && details !== null
+            ? JSON.stringify(details)
             : details;
 
-        try {
-            this.db.prepare(`
-                INSERT INTO audit_logs (
-                    id, actor_id, actor_username, actor_role, 
-                    action, entity_type, entity_id, details, 
-                    ip_address, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `).run(
-                id, actorId, actorUsername, actorRole,
-                action, entityType, entityId, detailsString,
-                ipAddress, status
-            );
-            return id;
-        } catch (err) {
-            console.error('Audit log recording failed:', err.message);
-            // In financial systems, audit trail failure should be surfaced
-            throw err;
-        }
+        await this.db.run(`
+            INSERT INTO audit_logs (
+                id, actor_id, actor_username, actor_role,
+                action, entity_type, entity_id, details,
+                ip_address, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+            id, actorId, actorUsername, actorRole,
+            action, entityType, entityId, detailsString,
+            ipAddress, status
+        );
+        return id;
     }
 
     /**
-     * Retrieve audit records with filtering and pagination.
-     * Accessible only by Administrators and Auditors.
+     * Retrieve audit records with filtering and pagination (Admin & Auditor only).
      */
-    getLogs({ limit = 50, offset = 0, entityType = null, actorId = null, status = null } = {}) {
-        let query = `
+    async getLogs({
+        limit = 50,
+        offset = 0,
+        entityType = null,
+        actorId = null,
+        status = null,
+        action = null,
+        search = null,
+        fromDate = null,
+        toDate = null
+    } = {}) {
+        const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 1000);
+        const safeOffset = Math.max(Number(offset) || 0, 0);
+
+        let where = ' WHERE 1=1';
+        const params = [];
+
+        if (entityType) {
+            where += ' AND entity_type = ?';
+            params.push(entityType);
+        }
+        if (actorId) {
+            where += ' AND actor_id = ?';
+            params.push(actorId);
+        }
+        if (status) {
+            where += ' AND status = ?';
+            params.push(status);
+        }
+        if (action) {
+            where += ' AND action LIKE ?';
+            params.push(`%${action}%`);
+        }
+        if (search) {
+            where += ' AND (actor_username LIKE ? OR action LIKE ? OR details LIKE ? OR entity_id LIKE ?)';
+            const term = `%${search}%`;
+            params.push(term, term, term, term);
+        }
+        if (fromDate) {
+            where += ' AND created_at >= ?';
+            params.push(fromDate);
+        }
+        if (toDate) {
+            where += ' AND created_at <= ?';
+            params.push(toDate);
+        }
+
+        const logs = await this.db.all(`
             SELECT id, actor_id, actor_username, actor_role,
                    action, entity_type, entity_id, details,
                    ip_address, status, created_at
             FROM audit_logs
-            WHERE 1=1
-        `;
-        const params = [];
+            ${where}
+            ORDER BY ${this.db.orderByInsertion('audit_logs', 'DESC')}
+            LIMIT ? OFFSET ?
+        `, ...params, safeLimit, safeOffset);
 
-        if (entityType) {
-            query += ' AND entity_type = ?';
-            params.push(entityType);
-        }
-        if (actorId) {
-            query += ' AND actor_id = ?';
-            params.push(actorId);
-        }
-        if (status) {
-            query += ' AND status = ?';
-            params.push(status);
-        }
-
-        query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
-        params.push(limit, offset);
-
-        const logs = this.db.prepare(query).all(...params);
-        const total = this.db.prepare('SELECT COUNT(*) as count FROM audit_logs').get().count;
+        const totalRow = await this.db.get(`SELECT COUNT(*) as count FROM audit_logs ${where}`, ...params);
 
         return {
-            total,
-            limit,
-            offset,
+            total: Number(totalRow.count),
+            limit: safeLimit,
+            offset: safeOffset,
             logs: logs.map(l => {
                 let parsedDetails = l.details;
                 try {
-                    parsedDetails = JSON.parse(l.details);
+                    parsedDetails = l.details ? JSON.parse(l.details) : null;
                 } catch (_) {}
                 return { ...l, details: parsedDetails };
             })
@@ -94,4 +117,3 @@ class AuditService {
 }
 
 module.exports = { AuditService };
-

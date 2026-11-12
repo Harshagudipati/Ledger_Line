@@ -1,38 +1,57 @@
 # Deployment Guide — LedgerLine / BalanceVault
 
-LedgerLine / BalanceVault has **zero third-party runtime dependencies** and runs cleanly on **Node.js 22+ / 24 LTS** (single server serving both the REST API under `/api/*` and the frontend static assets from `frontend/`).
+LedgerLine / BalanceVault runs cleanly on **Node.js 22+ / 24 LTS** (serving both the REST API under `/api/*` and the compiled React + Vite dashboard from `frontend/dist/`). It supports zero-dependency **SQLite WAL + in-memory sliding-window** mode out of the box, or **PostgreSQL + Redis** in distributed production deployments.
 
 ---
 
-## 1. Environment Variables
+## 1. Environment Variables (`.env.example`)
+
+Copy `.env.example` to `.env` for local configuration or inject variables directly into your container runtime:
 
 | Variable | Default | Description |
 |---|---|---|
-| `PORT` | `8080` | HTTP listen port (`0.0.0.0:$PORT` — automatically injected by Render, Railway, and Fly.io) |
-| `DB_PATH` | `backend/ledgerline.sqlite` | SQLite database file path. Point to a persistent disk mount (e.g. `/data/ledgerline.sqlite`) in production |
-| `JWT_SECRET` | `ledgerline-super-secret-key-2026-vvit-challenge` | **Required in hosted deployments:** Set a high-entropy 32+ character secret |
-| `AUTH_RATE_LIMIT_MAX` | `30` | Maximum requests per minute per IP on `/api/auth/login`, `/api/auth/register`, and `/api/auth/bootstrap` |
-| `RATE_LIMIT_MAX_REQUESTS` | `500` | Maximum requests per minute per IP on general `/api/*` endpoints |
-| `SKIP_AUTO_SEED` | unset (`false`) | Set to `true` only if booting a completely blank database intended for first-admin bootstrap (`POST /api/auth/bootstrap`) |
+| `PORT` | `8080` | HTTP listen port (`0.0.0.0:$PORT`) |
+| `JWT_SECRET` | Auto-generated in dev; **required in prod** | **Fail-fast in `NODE_ENV=production`:** startup aborts unless a strong `JWT_SECRET` is provided |
+| `DB_PATH` | `backend/ledgerline.sqlite` | SQLite database file path (ignored when `DATABASE_URL` is set) |
+| `DATABASE_URL` | unset | PostgreSQL connection string (`postgres://...`). Uses `PgAdapter` + `schema.postgres.sql` + `ORDER BY id ASC FOR UPDATE` (requires optional `npm install pg`) |
+| `REDIS_URL` | unset | Redis connection URL (`redis://...` or `rediss://...`). Uses built-in pure-Node RESP2 sliding-window limiter with automatic in-memory fallback |
+| `AUTH_RATE_LIMIT_MAX` | `30` | Max requests per minute per IP on auth routes |
+| `RATE_LIMIT_MAX_REQUESTS` | `500` | Max requests per minute per IP on general `/api/*` routes |
+| `MAX_FAILED_LOGINS` | `5` | Consecutive failed passwords before account lockout |
+| `LOCKOUT_DURATION_MS` | `900000` (15m) | Duration of brute-force lockout window |
+| `SEED_DEMO_USERS` | `true` in dev, `false` in prod | Auto-seed demo personas when DB is empty |
+| `SEED_*_PASSWORD` | random if unset | Optional deterministic seed passwords for `.env` (never committed to git) |
+| `SKIP_AUTO_SEED` | `false` | Set `true` for blank production DBs using `POST /api/auth/bootstrap` |
+| `APPLY_PG_ROLES` | `false` | Set `true` during `npm run migrate` on PostgreSQL to install `postgresRoles.sql` |
 
 ---
 
-## 2. Local Verification Before Deploy
+## 2. Build & Local Verification Before Deploy
 
 ```bash
-# Run all 6 automated test suites
+# 1. Install and build React + Vite frontend into frontend/dist/
+npm run setup:frontend
+npm run build
+
+# 2. Run database migrations & optional demo seed
+npm run migrate
+npm run seed
+
+# 3. Run all 7 automated verification suites
 npm test
 
-# Start the server locally
+# 4. Start backend API + built React SPA server
 npm start
 # Open http://localhost:8080
 ```
 
-On startup (unless `SKIP_AUTO_SEED=true`), `ensureSeeded()` initializes the SQLite schema, seeds the Clearing Vault and demo personas (`alice`, `bob`, `charlie`, `admin`, `auditor`), and verifies double-entry conservation automatically.
+For frontend hot-reload during development, run `npm start` in one terminal (`:8080`) and `npm run dev:frontend` (`:5173`, proxies `/api` to `:8080`) in a second terminal.
 
 ---
 
-## 3. Deploying with Docker (Any Cloud / VM)
+## 3. Deploying with Docker (Multi-Stage React + Node 24)
+
+The included [`Dockerfile`](../Dockerfile) builds `frontend/dist/` cleanly in Stage 1 and ships a minimal Node 24 LTS Stage 2 runtime image:
 
 ```bash
 # Build image
@@ -42,13 +61,14 @@ docker build -t ledgerline:latest .
 docker run -d \
   --name ledgerline \
   -p 8080:8080 \
-  -e JWT_SECRET="replace-with-random-64-char-hex-secret" \
+  -e NODE_ENV=production \
+  -e JWT_SECRET="$(openssl rand -hex 32)" \
   -e DB_PATH="/data/ledgerline.sqlite" \
   -v ledgerline_data:/data \
   ledgerline:latest
 ```
 
-Verify container health:
+Verify container health and readiness:
 ```bash
 curl http://localhost:8080/api/health
 curl http://localhost:8080/api/ready
@@ -56,57 +76,28 @@ curl http://localhost:8080/api/ready
 
 ---
 
-## 4. Platform-Specific One-Click Cloud Options
+## 4. Production PostgreSQL & Least-Privilege Roles (FR-4 / FR-24)
 
-### Option A: Render (Web Service)
-1. Push your repository to GitHub (`https://github.com/Harshagudipati/ledgerline`).
-2. Create a **New Web Service** on Render pointing to the repo.
-3. Choose either:
-   - **Docker Runtime** (automatically uses `Dockerfile`), **or**
-   - **Node Runtime** with **Build Command:** `echo "Zero dependencies"` and **Start Command:** `node backend/src/server.js` (ensure Node 24 is selected via `NODE_VERSION=24` env var).
-4. Set environment variables:
-   - `JWT_SECRET` = generate a strong random value
-   - `DB_PATH` = `/data/ledgerline.sqlite` (if attaching a Render Persistent Disk at `/data`) or omit to use `/app/backend/ledgerline.sqlite` for ephemeral demo resets.
-5. Set Health Check Path to `/api/health`.
-
-### Option B: Railway
-1. Connect your GitHub repository in Railway.
-2. Railway automatically detects the `Dockerfile`.
-3. Add a **Volume** mounted at `/data` and set:
-   - `DB_PATH=/data/ledgerline.sqlite`
-   - `JWT_SECRET=<random-secret>`
-4. Generate a public domain under **Settings -> Networking**.
-
-### Option C: Fly.io
-1. Install `flyctl` and initialize without overwriting `Dockerfile`:
-   ```bash
-   fly launch --no-deploy
-   fly volumes create ledgerline_data --size 1
-   ```
-2. Mount `ledgerline_data` at `/data` in `fly.toml`, set secrets, and deploy:
-   ```bash
-   fly secrets set JWT_SECRET="$(openssl rand -hex 32)" DB_PATH="/data/ledgerline.sqlite"
-   fly deploy
-   ```
+When `DATABASE_URL` is configured (`npm install pg` alongside deployment):
+1. `PgAdapter` applies [`backend/src/db/schema.postgres.sql`](../backend/src/db/schema.postgres.sql), enforcing `BIGINT` minor units (`CHECK (balance >= 0)`), `ON DELETE RESTRICT` foreign keys, and PL/pgSQL `audit_logs` immutability triggers.
+2. Row-level deadlocks are prevented using deterministic `ORDER BY id ASC FOR UPDATE` locking.
+3. [`backend/src/db/postgresRoles.sql`](../backend/src/db/postgresRoles.sql) defines separated least-privilege roles (`ledgerline_app`, `ledgerline_auditor`, `ledgerline_bootstrap`) plus a `SECURITY DEFINER` `bootstrap_first_admin` function so runtime application workers have zero DDL permissions.
 
 ---
 
-## 5. Production Database Option: PostgreSQL DDL
+## 5. Cloud Platforms (Render / Railway / Fly.io)
 
-For teams extending LedgerLine beyond embedded SQLite/WAL to managed PostgreSQL (RDS / Cloud SQL / Neon / Supabase), the full equivalent schema is provided in:
-- [`backend/src/db/schema.postgres.sql`](../backend/src/db/schema.postgres.sql)
-
-It preserves:
-- Minor-unit `BIGINT` amounts (`balance BIGINT CHECK (balance >= 0)`)
-- Foreign keys with `ON DELETE RESTRICT`
-- PL/pgSQL triggers (`prevent_audit_log_update`, `prevent_audit_log_delete`) enforcing strict append-only immutability on `audit_logs`
-- Deterministic row-level locking notes (`ORDER BY id FOR UPDATE`) and restricted bootstrap role template (`FR-4`).
+1. Push to GitHub (`Harshagudipati/ledgerline`) — GitHub Actions (`.github/workflows/ci.yml`) validates the React build and all 7 backend suites on Node 22 & 24.
+2. Deploy via **Docker Runtime** (auto-detects `Dockerfile`) or Node 24 (`npm --prefix frontend install && npm run build`, start `node backend/src/server.js`).
+3. Set `NODE_ENV=production`, a 64-character random `JWT_SECRET`, and either a persistent `/data` disk (`DB_PATH=/data/ledgerline.sqlite`) or managed PostgreSQL (`DATABASE_URL`) + Redis (`REDIS_URL`).
+4. Configure health probe to `GET /api/health` and readiness probe to `GET /api/ready`.
 
 ---
 
 ## 6. First-Admin Bootstrap Workflow (FR-4)
 
-When running with `SKIP_AUTO_SEED=true` on a fresh database with zero active `ADMIN` users:
+When running on an unseeded production database (`SEED_DEMO_USERS=false` or `SKIP_AUTO_SEED=true`):
+1. Open the React UI in your browser — `/api/auth/bootstrap-status` detects zero admins and automatically displays the **Initialize Root Administrator** setup wizard, **or** submit directly:
 ```bash
 curl -X POST https://your-deployed-url.example.com/api/auth/bootstrap \
   -H "Content-Type: application/json" \
@@ -116,4 +107,4 @@ curl -X POST https://your-deployed-url.example.com/api/auth/bootstrap \
     "password": "StrongAdminPassword123!"
   }'
 ```
-Once one `ADMIN` exists, `/api/auth/bootstrap` returns `409 ADMIN_ALREADY_BOOTSTRAPPED` permanently.
+2. Once the first `ADMIN` exists, `/api/auth/bootstrap` permanently returns `409 ADMIN_ALREADY_BOOTSTRAPPED`.

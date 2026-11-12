@@ -2,15 +2,12 @@
 -- LedgerLine / BalanceVault Production PostgreSQL Schema
 -- Multi-Role RBAC, Double-Entry Accounting, Idempotency, Append-Only Audit Trail
 -- ============================================================================
--- Usage:
---   psql "$DATABASE_URL" -f backend/src/db/schema.postgres.sql
---
--- Concurrency Note:
---   In PostgreSQL, wrap deposits, withdrawals, and transfers inside
---   `BEGIN ISOLATION LEVEL SERIALIZABLE` or lock account rows deterministically
---   in ascending ID order via `SELECT ... FROM accounts WHERE id IN (...) ORDER BY id FOR UPDATE`.
---   This mirrors the exclusive lock semantics used in SQLite (`BEGIN IMMEDIATE`).
--- ============================================================================
+
+-- 0. Schema Migrations Tracking
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 -- 1. Users Table (Admin, Account Holder, Auditor)
 CREATE TABLE IF NOT EXISTS users (
@@ -21,11 +18,21 @@ CREATE TABLE IF NOT EXISTS users (
     password_salt TEXT NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('ADMIN', 'ACCOUNT_HOLDER', 'AUDITOR')),
     status TEXT NOT NULL DEFAULT 'PENDING_APPROVAL' CHECK (status IN ('PENDING_APPROVAL', 'ACTIVE', 'DEACTIVATED')),
+    failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+    locked_until TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 2. Accounts Table (Integer minor-unit cents via BIGINT + Non-Negative CHECK constraint)
+-- 2. Revoked JWT Tokens Table (Server-Side Session Invalidation)
+CREATE TABLE IF NOT EXISTS revoked_tokens (
+    jti TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- 3. Accounts Table (Integer minor-unit cents via BIGINT + Non-Negative CHECK constraint)
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY,
     account_number TEXT UNIQUE NOT NULL,
@@ -39,7 +46,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 3. Transactions Table
+-- 4. Transactions Table
 CREATE TABLE IF NOT EXISTS transactions (
     id TEXT PRIMARY KEY,
     type TEXT NOT NULL CHECK (type IN ('DEPOSIT', 'WITHDRAWAL', 'TRANSFER')),
@@ -53,8 +60,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 4. Double-Entry Ledger Entries Table
--- Double-entry rule: Every transaction generates balanced DEBIT and CREDIT lines.
+-- 5. Double-Entry Ledger Entries Table
 CREATE TABLE IF NOT EXISTS ledger_entries (
     id TEXT PRIMARY KEY,
     transaction_id TEXT NOT NULL REFERENCES transactions(id) ON DELETE RESTRICT,
@@ -64,7 +70,7 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 5. Idempotency Keys Registry Table
+-- 6. Idempotency Keys Registry Table
 CREATE TABLE IF NOT EXISTS idempotency_keys (
     key TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id),
@@ -77,7 +83,7 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
     expires_at TIMESTAMPTZ NOT NULL
 );
 
--- 6. Append-Only Audit Trail Table
+-- 7. Append-Only Audit Trail Table
 CREATE TABLE IF NOT EXISTS audit_logs (
     id TEXT PRIMARY KEY,
     actor_id TEXT,
@@ -92,9 +98,6 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- ============================================================================
--- PostgreSQL Trigger Function to Enforce Append-Only Immutability on audit_logs
--- ============================================================================
 CREATE OR REPLACE FUNCTION enforce_audit_logs_append_only()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -114,19 +117,9 @@ BEFORE DELETE ON audit_logs
 FOR EACH ROW
 EXECUTE FUNCTION enforce_audit_logs_append_only();
 
--- ============================================================================
--- Indexes
--- ============================================================================
 CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner_id);
 CREATE INDEX IF NOT EXISTS idx_ledger_tx ON ledger_entries(transaction_id);
 CREATE INDEX IF NOT EXISTS idx_ledger_account ON ledger_entries(account_id);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_keys(expires_at);
-
--- ============================================================================
--- FR-4 Restricted Bootstrap Role Example (Optional for Production Hardening)
--- ============================================================================
--- CREATE ROLE ledgerline_bootstrap NOINHERIT LOGIN PASSWORD 'replace-with-strong-secret';
--- GRANT INSERT, SELECT ON users TO ledgerline_bootstrap;
--- GRANT INSERT ON audit_logs TO ledgerline_bootstrap;
-
+CREATE INDEX IF NOT EXISTS idx_revoked_expires ON revoked_tokens(expires_at);

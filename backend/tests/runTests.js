@@ -1,10 +1,13 @@
 // backend/tests/runTests.js
+process.env.QUIET_LOGS = process.env.QUIET_LOGS || 'true';
+
 const { testConcurrency } = require('./concurrency.test');
 const { testIdempotency } = require('./idempotency.test');
 const { testLedger } = require('./ledger.test');
 const { testSecurity } = require('./security.test');
 const { testAudit } = require('./audit.test');
 const { testHttpE2E } = require('./http.e2e.test');
+const { testImprovements } = require('./improvements.test');
 
 async function runAllSuites() {
     console.log('╔══════════════════════════════════════════════════════════════╗');
@@ -19,7 +22,8 @@ async function runAllSuites() {
         { name: '3. Double-Entry Invariance & Conservation', fn: testLedger },
         { name: '4. Security, RBAC & Ownership Protection', fn: testSecurity },
         { name: '5. Append-Only Audit Trail & Immutability Triggers', fn: testAudit },
-        { name: '6. End-to-End HTTP API, RBAC, Freeze & Rate Limit', fn: testHttpE2E }
+        { name: '6. HTTP E2E API, RBAC, Freeze & Rate Limiter', fn: testHttpE2E },
+        { name: '7. Session Revocation, Lockout, Sweep, Filters, Metrics & Migrations', fn: testImprovements }
     ];
 
     let passed = 0;
@@ -30,9 +34,9 @@ async function runAllSuites() {
             await suite.fn();
             passed++;
         } catch (err) {
+            failed++;
             console.error(`\n❌ FAILED: ${suite.name}`);
             console.error(err);
-            failed++;
         }
     }
 
@@ -45,10 +49,9 @@ async function runAllSuites() {
         console.error('❌ Some tests failed.');
         process.exit(1);
     } else {
-        console.log('🎉 ALL 6 TEST SUITES PASSED! ALL SUCCESS CRITERIA MET.');
+        console.log('🏆 ALL AUTOMATED TEST SUITES PASSED! SYSTEM VERIFIED.');
         process.exit(0);
     }
 }
 
 runAllSuites();
-

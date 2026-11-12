@@ -1,7 +1,7 @@
 // backend/src/middleware/auth.js
 const { verifyToken } = require('../services/authService');
 
-function authenticate(req, res, next) {
+async function authenticate(req, res, db = null) {
     const authHeader = req.headers['authorization'];
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -12,6 +12,16 @@ function authenticate(req, res, next) {
     const token = authHeader.substring(7);
     try {
         const payload = verifyToken(token);
+
+        if (db && payload.jti) {
+            const revoked = await db.get('SELECT jti FROM revoked_tokens WHERE jti = ?', payload.jti);
+            if (revoked) {
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'TOKEN_REVOKED', message: 'Session has been signed out or revoked' }));
+                return false;
+            }
+        }
+
         req.user = payload;
         return true;
     } catch (err) {
@@ -46,4 +56,3 @@ module.exports = {
     authenticate,
     requireRole
 };
-

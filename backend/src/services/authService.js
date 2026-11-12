@@ -15,11 +15,12 @@ function verifyPassword(password, storedHash, storedSalt) {
     return crypto.timingSafeEqual(Buffer.from(hash, 'utf8'), Buffer.from(storedHash, 'utf8'));
 }
 
-// Lightweight, secure JWT implementation with HMAC-SHA256
 function generateToken(payload, expiresInHours = config.TOKEN_EXPIRY_HOURS) {
     const header = { alg: 'HS256', typ: 'JWT' };
-    const exp = Math.floor(Date.now() / 1000) + (expiresInHours * 3600);
-    const enrichedPayload = { ...payload, exp, iat: Math.floor(Date.now() / 1000) };
+    const iat = Math.floor(Date.now() / 1000);
+    const exp = iat + (expiresInHours * 3600);
+    const jti = 'jti_' + crypto.randomUUID();
+    const enrichedPayload = { ...payload, jti, exp, iat };
 
     const encodedHeader = Buffer.from(JSON.stringify(header)).toString('base64url');
     const encodedPayload = Buffer.from(JSON.stringify(enrichedPayload)).toString('base64url');
@@ -47,7 +48,9 @@ function verifyToken(token) {
         .update(`${encodedHeader}.${encodedPayload}`)
         .digest('base64url');
 
-    if (!crypto.timingSafeEqual(Buffer.from(signature, 'utf8'), Buffer.from(expectedSignature, 'utf8'))) {
+    const sigBuf = Buffer.from(signature, 'utf8');
+    const expectedBuf = Buffer.from(expectedSignature, 'utf8');
+    if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
         throw new Error('INVALID_TOKEN_SIGNATURE');
     }
 
@@ -65,75 +68,142 @@ class AuthService {
         this.db = db;
     }
 
-    // FR-6: Account-holder self registration
-    register({ username, email, password, role = 'ACCOUNT_HOLDER' }) {
+    /**
+     * FR-6: Public Account-Holder Self-Registration.
+     * New holders are placed in PENDING_APPROVAL until an Admin activates them.
+     */
+    async register({ username, email, password, role = 'ACCOUNT_HOLDER' }) {
         if (!username || !email || !password) {
             throw new Error('MISSING_FIELDS');
         }
-        if (typeof password !== 'string' || password.length < 8) {
+        if (String(password).length < 8) {
             throw new Error('PASSWORD_TOO_SHORT');
-        }
-
-        const validRoles = ['ACCOUNT_HOLDER', 'AUDITOR', 'ADMIN'];
-        if (!validRoles.includes(role)) {
-            throw new Error('INVALID_ROLE');
         }
         if (role !== 'ACCOUNT_HOLDER') {
             throw new Error('FORBIDDEN_SELF_REGISTRATION_ROLE');
         }
 
-        const existingUser = this.db.prepare(
-            'SELECT id FROM users WHERE username = ? OR email = ?'
-        ).get(username, email);
-
-        if (existingUser) {
+        const existing = await this.db.get(
+            'SELECT id FROM users WHERE username = ? OR email = ?',
+            username,
+            email
+        );
+        if (existing) {
             throw new Error('USER_ALREADY_EXISTS');
         }
 
-        const userId = 'usr_' + crypto.randomUUID();
+        const id = 'usr_' + crypto.randomUUID();
         const { hash, salt } = hashPassword(password);
-        const initialStatus = 'PENDING_APPROVAL';
 
-        this.db.prepare(`
+        await this.db.run(`
             INSERT INTO users (id, username, email, password_hash, password_salt, role, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run(userId, username, email, hash, salt, role, initialStatus);
+            VALUES (?, ?, ?, ?, ?, ?, 'PENDING_APPROVAL')
+        `, id, username, email, hash, salt, 'ACCOUNT_HOLDER');
 
         return {
-            id: userId,
+            id,
             username,
             email,
-            role,
-            status: initialStatus,
-            message: 'Registration submitted successfully. Awaiting administrator activation.'
+            role: 'ACCOUNT_HOLDER',
+            status: 'PENDING_APPROVAL'
         };
     }
 
-    // FR-1: Secure login
-    login({ username, password }) {
+    /**
+     * FR-4: First-Admin Bootstrap Process.
+     * Succeeds ONLY if no non-system ADMIN user exists in the database.
+     */
+    async bootstrapAdmin({ username, email, password }) {
+        if (!username || !email || !password) {
+            throw new Error('MISSING_FIELDS');
+        }
+        if (String(password).length < 8) {
+            throw new Error('PASSWORD_TOO_SHORT');
+        }
+
+        const existingAdmin = await this.db.get(
+            "SELECT COUNT(*) as count FROM users WHERE role = 'ADMIN' AND id != ?",
+            config.SYSTEM_USER_ID
+        );
+        if (Number(existingAdmin.count) > 0) {
+            throw new Error('ADMIN_ALREADY_BOOTSTRAPPED');
+        }
+
+        const id = 'usr_' + crypto.randomUUID();
+        const { hash, salt } = hashPassword(password);
+
+        await this.db.run(`
+            INSERT INTO users (id, username, email, password_hash, password_salt, role, status)
+            VALUES (?, ?, ?, ?, ?, 'ADMIN', 'ACTIVE')
+        `, id, username, email, hash, salt);
+
+        return {
+            id,
+            username,
+            email,
+            role: 'ADMIN',
+            status: 'ACTIVE'
+        };
+    }
+
+    /**
+     * FR-1: Secure Authentication with lockout protection against brute-force logins.
+     */
+    async login({ username, password }) {
         if (!username || !password) {
             throw new Error('MISSING_CREDENTIALS');
         }
 
-        const user = this.db.prepare(
-            'SELECT id, username, email, password_hash, password_salt, role, status FROM users WHERE username = ?'
-        ).get(username);
-
+        const user = await this.db.get('SELECT * FROM users WHERE username = ?', username);
         if (!user) {
             throw new Error('INVALID_CREDENTIALS');
+        }
+
+        if (user.locked_until) {
+            const lockExpiry = new Date(user.locked_until).getTime();
+            if (!Number.isNaN(lockExpiry) && lockExpiry > Date.now()) {
+                throw new Error('ACCOUNT_TEMPORARILY_LOCKED');
+            }
+            // Expired lock clears cleanly
+            await this.db.run(
+                'UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = ?',
+                user.id
+            );
+            user.failed_login_attempts = 0;
+        }
+
+        const isValid = verifyPassword(password, user.password_hash, user.password_salt);
+        if (!isValid) {
+            const nextAttempts = Number(user.failed_login_attempts || 0) + 1;
+            const shouldLock = nextAttempts >= config.MAX_FAILED_LOGINS;
+            const lockedUntil = shouldLock
+                ? new Date(Date.now() + config.LOCKOUT_DURATION_MS).toISOString()
+                : null;
+
+            await this.db.run(`
+                UPDATE users
+                SET failed_login_attempts = ?, locked_until = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            `, nextAttempts, lockedUntil, user.id);
+
+            throw new Error(shouldLock ? 'ACCOUNT_TEMPORARILY_LOCKED' : 'INVALID_CREDENTIALS');
         }
 
         if (user.status === 'PENDING_APPROVAL') {
             throw new Error('ACCOUNT_PENDING_APPROVAL');
         }
-
         if (user.status === 'DEACTIVATED') {
             throw new Error('ACCOUNT_DEACTIVATED');
         }
+        if (user.status !== 'ACTIVE') {
+            throw new Error('USER_NOT_ACTIVE');
+        }
 
-        const isValid = verifyPassword(password, user.password_hash, user.password_salt);
-        if (!isValid) {
-            throw new Error('INVALID_CREDENTIALS');
+        if (Number(user.failed_login_attempts || 0) > 0 || user.locked_until) {
+            await this.db.run(
+                'UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = ?',
+                user.id
+            );
         }
 
         const token = generateToken({
@@ -154,31 +224,73 @@ class AuthService {
         };
     }
 
-    // FR-4: First-admin bootstrap process
-    bootstrapAdmin({ username = 'admin', email = 'admin@ledgerline.local', password = 'AdminPassword123!' }) {
-        const adminCount = this.db.prepare(
-            "SELECT COUNT(*) as count FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE' AND id != ?"
-        ).get(config.SYSTEM_USER_ID).count;
+    /**
+     * Server-side session logout: persists the JWT `jti` into `revoked_tokens`.
+     */
+    async revokeToken({ jti, userId, exp }) {
+        if (!jti || !userId) return false;
+        const expiresAt = exp
+            ? new Date(exp * 1000).toISOString()
+            : new Date(Date.now() + config.TOKEN_EXPIRY_HOURS * 3600 * 1000).toISOString();
 
-        if (adminCount > 0) {
-            throw new Error('ADMIN_ALREADY_BOOTSTRAPPED');
+        await this.db.run(`
+            INSERT INTO revoked_tokens (jti, user_id, expires_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(jti) DO NOTHING
+        `, jti, userId, expiresAt);
+
+        // Best-effort opportunistic purge of expired revocations
+        await this.db.run('DELETE FROM revoked_tokens WHERE expires_at < ?', new Date().toISOString());
+        return true;
+    }
+
+    async isTokenRevoked(jti) {
+        if (!jti) return false;
+        const row = await this.db.get('SELECT jti FROM revoked_tokens WHERE jti = ?', jti);
+        return Boolean(row);
+    }
+
+    /**
+     * Authenticated self-service password rotation; revokes previous token & issues a fresh one.
+     */
+    async changePassword({ userId, currentPassword, newPassword, currentJti = null, currentExp = null }) {
+        if (!currentPassword || !newPassword) {
+            throw new Error('MISSING_FIELDS');
+        }
+        if (String(newPassword).length < 8) {
+            throw new Error('PASSWORD_TOO_SHORT');
         }
 
-        const adminId = 'usr_admin_bootstrap';
-        const { hash, salt } = hashPassword(password);
+        const user = await this.db.get('SELECT * FROM users WHERE id = ?', userId);
+        if (!user) {
+            throw new Error('USER_NOT_FOUND');
+        }
 
-        this.db.prepare(`
-            INSERT OR REPLACE INTO users (id, username, email, password_hash, password_salt, role, status)
-            VALUES (?, ?, ?, ?, ?, 'ADMIN', 'ACTIVE')
-        `).run(adminId, username, email, hash, salt);
+        const matches = verifyPassword(currentPassword, user.password_hash, user.password_salt);
+        if (!matches) {
+            throw new Error('INVALID_CURRENT_PASSWORD');
+        }
+
+        const { hash, salt } = hashPassword(newPassword);
+        await this.db.run(`
+            UPDATE users
+            SET password_hash = ?, password_salt = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        `, hash, salt, userId);
+
+        if (currentJti) {
+            await this.revokeToken({ jti: currentJti, userId, exp: currentExp });
+        }
+
+        const freshToken = generateToken({
+            userId: user.id,
+            username: user.username,
+            role: user.role
+        });
 
         return {
-            id: adminId,
-            username,
-            email,
-            role: 'ADMIN',
-            status: 'ACTIVE',
-            message: 'First administrator successfully bootstrapped.'
+            message: 'Password updated successfully.',
+            token: freshToken
         };
     }
 }
@@ -190,4 +302,3 @@ module.exports = {
     generateToken,
     verifyToken
 };
-

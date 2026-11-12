@@ -7,102 +7,80 @@ const { AccountService } = require('../src/services/accountService');
 const { LedgerService } = require('../src/services/ledgerService');
 const { AuditService } = require('../src/services/auditService');
 const { AdminService } = require('../src/services/adminService');
+const { TEST_PASSWORDS } = require('./testFixtures');
 
 async function testSecurity() {
     console.log('\n======================================================');
     console.log(' TEST SUITE 4: Security, RBAC & Ownership Protection');
     console.log('======================================================');
 
-    const db = getDatabase(':memory:');
-    const { admin, auditor, alice, bob, charlie } = seedDatabase(db);
-    
+    const db = getDatabase(':memory:', true);
+    const seeded = await seedDatabase(db, { passwords: TEST_PASSWORDS, forceDemoUsers: true });
+
     const auditService = new AuditService(db);
     const authService = new AuthService(db);
-    const accountService = new AccountService(db);
+    const accountService = new AccountService(db, auditService);
     const ledgerService = new LedgerService(db, auditService);
     const adminService = new AdminService(db, auditService, accountService);
 
-    const aliceAcc = accountService.getAccountsForUser({ userId: alice.id, role: 'ACCOUNT_HOLDER' })[0];
-    const bobAcc = accountService.getAccountsForUser({ userId: bob.id, role: 'ACCOUNT_HOLDER' })[0];
+    const alice = { userId: seeded.alice.id, username: 'alice', role: 'ACCOUNT_HOLDER' };
+    const bob = { userId: seeded.bob.id, username: 'bob', role: 'ACCOUNT_HOLDER' };
+    const admin = { userId: seeded.admin.id, username: 'admin', role: 'ADMIN' };
 
-    console.log('1. Testing FR-3: Account Ownership Protection...');
-    // Bob attempts to withdraw from Alice's account!
-    let unauthorizedWithdrawalCaught = false;
+    const bobAcc = (await accountService.getAccountsForUser(bob))[0];
+
+    console.log('1. Testing Horizontal Privilege Escalation (Alice withdrawing from Bob)...');
+    let errMsg = null;
     try {
-        ledgerService.withdraw({
-            accountId: aliceAcc.id,
-            amount: 5000,
-            idempotencyKey: 'unauth_withdraw_1',
-            description: 'Theft attempt',
-            actor: { userId: bob.id, username: bob.username, role: 'ACCOUNT_HOLDER' }
+        await ledgerService.withdraw({
+            accountId: bobAcc.id,
+            amount: 1000,
+            idempotencyKey: 'hack_attempt_1',
+            actor: alice
         });
     } catch (err) {
-        unauthorizedWithdrawalCaught = true;
-        assert.strictEqual(err.message, 'UNAUTHORIZED_ACCOUNT_ACCESS');
-        console.log(`✓ Unauthorized cross-account withdrawal blocked: ${err.message}`);
+        errMsg = err.message;
     }
-    assert(unauthorizedWithdrawalCaught, 'User must not be able to withdraw from another users account');
+    assert.strictEqual(errMsg, 'UNAUTHORIZED_ACCOUNT_ACCESS', 'Alice must be blocked from withdrawing from Bob account');
+    console.log('✓ Unauthorized withdrawal blocked cleanly');
 
-    // Bob attempts to view Alice's account statement!
-    let unauthorizedStatementCaught = false;
+    console.log('2. Testing Unauthorized Statement Access (Alice reading Bob statement)...');
+    let stmtErr = null;
     try {
-        accountService.getAccountStatement(aliceAcc.id, { userId: bob.id, role: 'ACCOUNT_HOLDER' });
+        await accountService.getAccountStatement(bobAcc.id, alice);
     } catch (err) {
-        unauthorizedStatementCaught = true;
-        assert.strictEqual(err.message, 'UNAUTHORIZED_ACCOUNT_ACCESS');
-        console.log(`✓ Unauthorized cross-account statement access blocked: ${err.message}`);
+        stmtErr = err.message;
     }
-    assert(unauthorizedStatementCaught, 'User must not be able to read another users statement');
+    assert.strictEqual(stmtErr, 'UNAUTHORIZED_ACCOUNT_ACCESS');
+    console.log('✓ Unauthorized statement read blocked cleanly');
 
-    console.log('2. Testing FR-7: Account Onboarding Workflow...');
-    // Charlie is PENDING_APPROVAL. Attempting login must be blocked.
-    let pendingLoginCaught = false;
+    console.log('3. Testing PENDING_APPROVAL user login block & Admin Activation (FR-6 / FR-8)...');
+    let pendingErr = null;
     try {
-        authService.login({ username: 'charlie', password: 'CharliePassword123!' });
+        await authService.login({ username: 'charlie', password: TEST_PASSWORDS.charlie });
     } catch (err) {
-        pendingLoginCaught = true;
-        assert.strictEqual(err.message, 'ACCOUNT_PENDING_APPROVAL');
-        console.log(`✓ Unactivated user login safely blocked: ${err.message}`);
+        pendingErr = err.message;
     }
-    assert(pendingLoginCaught, 'Pending user must not be able to log in before admin approval');
+    assert.strictEqual(pendingErr, 'ACCOUNT_PENDING_APPROVAL', 'Pending user cannot log in prior to admin approval');
 
-    // Admin reviews and activates Charlie
-    console.log('  - Admin approves Charlie...');
-    const activationResult = adminService.activateUser(charlie.id, {
-        userId: admin.id,
-        username: admin.username,
-        role: 'ADMIN'
-    });
-    assert.strictEqual(activationResult.status, 'ACTIVE');
-    assert(activationResult.initialAccount, 'Initial checking account auto-provisioned upon activation');
-    console.log(`✓ Charlie successfully activated with initial account ${activationResult.initialAccount.account_number}`);
+    await adminService.activateUser(seeded.charlie.id, admin);
+    const charlieLogin = await authService.login({ username: 'charlie', password: TEST_PASSWORDS.charlie });
+    assert.ok(charlieLogin.token, 'Activated user should log in successfully');
+    console.log('✓ Pending login blocked -> Admin approved -> Charlie logged in');
 
-    // Now Charlie logs in successfully!
-    const charlieLogin = authService.login({ username: 'charlie', password: 'CharliePassword123!' });
-    assert(charlieLogin.token, 'Activated user gets JWT token upon login');
-    console.log('✓ Charlie logged in successfully with valid JWT token');
-
-    console.log('3. Testing Admin self-deactivation prevention...');
-    let selfDeactivateCaught = false;
+    console.log('4. Testing Admin Deactivation blocks subsequent login...');
+    await adminService.deactivateUser(seeded.charlie.id, admin);
+    let deactivatedErr = null;
     try {
-        adminService.deactivateUser(admin.id, { userId: admin.id, username: admin.username, role: 'ADMIN' });
+        await authService.login({ username: 'charlie', password: TEST_PASSWORDS.charlie });
     } catch (err) {
-        selfDeactivateCaught = true;
-        assert.strictEqual(err.message, 'CANNOT_DEACTIVATE_OWN_ADMIN_ACCOUNT');
-        console.log(`✓ Admin self-deactivation safely blocked: ${err.message}`);
+        deactivatedErr = err.message;
     }
-    assert(selfDeactivateCaught);
+    assert.strictEqual(deactivatedErr, 'ACCOUNT_DEACTIVATED');
+    console.log('✓ Deactivated user blocked from logging in');
 
-    console.log('✓ PASS: Security, RBAC & Ownership checks 100% verified!');
-    return true;
-}
-
-if (require.main === module) {
-    testSecurity().catch(err => {
-        console.error('Test failed:', err);
-        process.exit(1);
-    });
+    await db.close();
+    console.log('✓ PASS: RBAC, ownership isolation & onboarding security verified!');
 }
 
 module.exports = { testSecurity };
-

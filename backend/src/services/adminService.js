@@ -10,12 +10,9 @@ class AdminService {
         this.accountService = accountService;
     }
 
-    /**
-     * FR-8: List all platform users with filtering (excludes internal system root user).
-     */
-    listUsers({ status = null, role = null } = {}) {
+    async listUsers({ status = null, role = null } = {}) {
         let query = `
-            SELECT id, username, email, role, status, created_at, updated_at
+            SELECT id, username, email, role, status, failed_login_attempts, locked_until, created_at, updated_at
             FROM users
             WHERE id != ?
         `;
@@ -30,26 +27,27 @@ class AdminService {
             params.push(role);
         }
 
-        query += ' ORDER BY created_at DESC, rowid DESC';
-        return this.db.prepare(query).all(...params);
+        query += ' ORDER BY created_at DESC';
+        return this.db.all(query, ...params);
     }
 
-    /**
-     * FR-8: Admin directly creates an active user (Account Holder, Auditor, or Admin).
-     */
-    createUser({ username, email, password, role = 'ACCOUNT_HOLDER' }, adminUser) {
+    async createUser({ username, email, password, role = 'ACCOUNT_HOLDER' }, adminUser) {
         if (!username || !email || !password) {
             throw new Error('MISSING_FIELDS');
         }
-        if (typeof password !== 'string' || password.length < 8) {
+        if (String(password).length < 8) {
             throw new Error('PASSWORD_TOO_SHORT');
         }
-        const validRoles = ['ACCOUNT_HOLDER', 'AUDITOR', 'ADMIN'];
+        const validRoles = ['ADMIN', 'ACCOUNT_HOLDER', 'AUDITOR'];
         if (!validRoles.includes(role)) {
             throw new Error('INVALID_ROLE');
         }
 
-        const existing = this.db.prepare('SELECT id FROM users WHERE username = ? OR email = ?').get(username, email);
+        const existing = await this.db.get(
+            'SELECT id FROM users WHERE username = ? OR email = ?',
+            username,
+            email
+        );
         if (existing) {
             throw new Error('USER_ALREADY_EXISTS');
         }
@@ -57,14 +55,14 @@ class AdminService {
         const userId = 'usr_' + crypto.randomUUID();
         const { hash, salt } = hashPassword(password);
 
-        this.db.prepare(`
+        await this.db.run(`
             INSERT INTO users (id, username, email, password_hash, password_salt, role, status)
             VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')
-        `).run(userId, username, email, hash, salt, role);
+        `, userId, username, email, hash, salt, role);
 
         let initialAccount = null;
-        if (role === 'ACCOUNT_HOLDER') {
-            initialAccount = this.accountService.createAccount({
+        if (role === 'ACCOUNT_HOLDER' && this.accountService) {
+            initialAccount = await this.accountService.createAccount({
                 ownerId: userId,
                 accountType: 'CHECKING',
                 currency: 'USD'
@@ -72,11 +70,11 @@ class AdminService {
         }
 
         if (this.auditService && adminUser) {
-            this.auditService.record({
+            await this.auditService.record({
                 actorId: adminUser.userId,
                 actorUsername: adminUser.username,
                 actorRole: adminUser.role,
-                action: 'USER_CREATED_BY_ADMIN',
+                action: 'ADMIN_CREATED_USER',
                 entityType: 'USER',
                 entityId: userId,
                 details: { username, email, role, initialAccountId: initialAccount?.id || null },
@@ -94,28 +92,23 @@ class AdminService {
         };
     }
 
-    /**
-     * FR-7: Approve and activate a pending user onboarding request.
-     * When an account holder is activated, also provision their initial primary Checking account!
-     */
-    activateUser(userId, adminUser) {
-        const user = this.db.prepare('SELECT id, username, email, role, status FROM users WHERE id = ?').get(userId);
+    async activateUser(userId, adminUser) {
+        const user = await this.db.get('SELECT id, username, email, role, status FROM users WHERE id = ?', userId);
         if (!user) {
             throw new Error('USER_NOT_FOUND');
         }
 
-        this.db.prepare(`
+        await this.db.run(`
             UPDATE users
-            SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP
+            SET status = 'ACTIVE', failed_login_attempts = 0, locked_until = NULL, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
-        `).run(userId);
+        `, userId);
 
-        // If the activated user is an ACCOUNT_HOLDER and has no accounts yet, provision their initial checking account!
         let initialAccount = null;
         if (user.role === 'ACCOUNT_HOLDER') {
-            const existingAccounts = this.db.prepare('SELECT id FROM accounts WHERE owner_id = ?').all(userId);
+            const existingAccounts = await this.db.all('SELECT id FROM accounts WHERE owner_id = ?', userId);
             if (existingAccounts.length === 0) {
-                initialAccount = this.accountService.createAccount({
+                initialAccount = await this.accountService.createAccount({
                     ownerId: userId,
                     accountType: 'CHECKING',
                     currency: 'USD'
@@ -124,7 +117,7 @@ class AdminService {
         }
 
         if (this.auditService) {
-            this.auditService.record({
+            await this.auditService.record({
                 actorId: adminUser.userId,
                 actorUsername: adminUser.username,
                 actorRole: adminUser.role,
@@ -144,11 +137,8 @@ class AdminService {
         };
     }
 
-    /**
-     * Deactivate a user.
-     */
-    deactivateUser(userId, adminUser) {
-        const user = this.db.prepare('SELECT id, username, email, role, status FROM users WHERE id = ?').get(userId);
+    async deactivateUser(userId, adminUser) {
+        const user = await this.db.get('SELECT id, username, email, role, status FROM users WHERE id = ?', userId);
         if (!user) {
             throw new Error('USER_NOT_FOUND');
         }
@@ -159,14 +149,14 @@ class AdminService {
             throw new Error('CANNOT_DEACTIVATE_SYSTEM_ROOT');
         }
 
-        this.db.prepare(`
+        await this.db.run(`
             UPDATE users
             SET status = 'DEACTIVATED', updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
-        `).run(userId);
+        `, userId);
 
         if (this.auditService) {
-            this.auditService.record({
+            await this.auditService.record({
                 actorId: adminUser.userId,
                 actorUsername: adminUser.username,
                 actorRole: adminUser.role,
@@ -185,44 +175,53 @@ class AdminService {
         };
     }
 
-    /**
-     * System-wide overview statistics.
-     */
-    getSystemStats() {
-        const userStats = this.db.prepare(`
-            SELECT 
+    async getSystemStats() {
+        const userStats = await this.db.get(`
+            SELECT
                 COUNT(*) as total_users,
-                SUM(CASE WHEN status = 'PENDING_APPROVAL' THEN 1 ELSE 0 END) as pending_users,
-                SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) as active_users
+                COALESCE(SUM(CASE WHEN status = 'PENDING_APPROVAL' THEN 1 ELSE 0 END), 0) as pending_users,
+                COALESCE(SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END), 0) as active_users
             FROM users
             WHERE id != ?
-        `).get(config.SYSTEM_USER_ID);
+        `, config.SYSTEM_USER_ID);
 
-        const accountStats = this.db.prepare(`
-            SELECT 
+        const accountStats = await this.db.get(`
+            SELECT
                 COUNT(*) as total_accounts,
                 COALESCE(SUM(balance), 0) as total_balances
             FROM accounts
             WHERE account_type != 'SYSTEM_CLEARING'
-        `).get();
+        `);
 
-        const txStats = this.db.prepare(`
-            SELECT 
+        const txStats = await this.db.get(`
+            SELECT
                 COUNT(*) as total_transactions,
                 COALESCE(SUM(amount), 0) as total_volume
             FROM transactions
             WHERE status = 'COMPLETED'
-        `).get();
+        `);
 
-        const auditStats = this.db.prepare(`
+        const auditStats = await this.db.get(`
             SELECT COUNT(*) as total_audit_entries FROM audit_logs
-        `).get();
+        `);
 
         return {
-            users: userStats,
-            accounts: accountStats,
-            transactions: txStats,
-            audit: auditStats
+            users: {
+                total_users: Number(userStats.total_users || 0),
+                pending_users: Number(userStats.pending_users || 0),
+                active_users: Number(userStats.active_users || 0)
+            },
+            accounts: {
+                total_accounts: Number(accountStats.total_accounts || 0),
+                total_balances: Number(accountStats.total_balances || 0)
+            },
+            transactions: {
+                total_transactions: Number(txStats.total_transactions || 0),
+                total_volume: Number(txStats.total_volume || 0)
+            },
+            audit: {
+                total_audit_entries: Number(auditStats.total_audit_entries || 0)
+            }
         };
     }
 }

@@ -2,102 +2,71 @@
 const assert = require('node:assert');
 const { getDatabase } = require('../src/db/database');
 const { seedDatabase } = require('../src/db/seed');
-const { LedgerService } = require('../src/services/ledgerService');
 const { AccountService } = require('../src/services/accountService');
+const { LedgerService } = require('../src/services/ledgerService');
 const { AuditService } = require('../src/services/auditService');
+const { TEST_PASSWORDS } = require('./testFixtures');
 
 async function testConcurrency() {
     console.log('\n======================================================');
     console.log(' TEST SUITE 1: Concurrency Protection (100 Parallel Requests)');
     console.log('======================================================');
 
-    // Setup fresh isolated in-memory DB
-    const db = getDatabase(':memory:');
-    const { alice } = seedDatabase(db);
-    
+    const db = getDatabase(':memory:', true);
+    const seeded = await seedDatabase(db, { passwords: TEST_PASSWORDS, forceDemoUsers: true });
+
     const auditService = new AuditService(db);
-    const accountService = new AccountService(db);
+    const accountService = new AccountService(db, auditService);
     const ledgerService = new LedgerService(db, auditService);
 
-    // Create a dedicated test account with exactly $100.00 (10,000 cents)
-    const testAccount = accountService.createAccount({
-        ownerId: alice.id,
-        accountType: 'CHECKING',
-        currency: 'USD'
-    });
+    const alice = { userId: seeded.alice.id, username: 'alice', role: 'ACCOUNT_HOLDER' };
+    const testAcc = await accountService.createAccount({ ownerId: alice.userId, accountType: 'CHECKING' });
 
-    ledgerService.deposit({
-        accountId: testAccount.id,
+    await ledgerService.deposit({
+        accountId: testAcc.id,
         amount: 10000, // $100.00
-        idempotencyKey: 'concurrency_init_deposit',
-        description: 'Initial balance for concurrency test',
-        actor: { userId: alice.id, username: alice.username, role: 'ACCOUNT_HOLDER' }
+        idempotencyKey: 'concurrency_seed_dep',
+        actor: alice
     });
 
-    const initialAccountState = accountService.getAccountById(testAccount.id);
-    assert.strictEqual(initialAccountState.balance, 10000, 'Initial balance must be $100.00 (10,000 cents)');
-    console.log(`✓ Test account created with balance: $${initialAccountState.balance / 100}`);
+    const initialAccount = await accountService.getAccountById(testAcc.id);
+    assert.strictEqual(initialAccount.balance, 10000, 'Test account must start at $100.00');
+    console.log(`✓ Test account created with balance: $${(initialAccount.balance / 100).toFixed(2)}`);
 
-    // Fire 100 parallel withdrawal requests of $10.00 (1,000 cents) each
-    // Exactly 10 can succeed before funds are exhausted! 90 must fail!
-    const totalRequests = 100;
-    const withdrawalAmount = 1000; // $10.00
-    console.log(`⚡ Dispatching ${totalRequests} simultaneous parallel withdrawals of $${withdrawalAmount / 100}...`);
+    const TOTAL_PARALLEL = 100;
+    const WITHDRAW_AMOUNT = 1000; // $10.00
+    console.log(`⚡ Dispatching ${TOTAL_PARALLEL} simultaneous parallel withdrawals of $10...`);
 
-    const promises = [];
-    for (let i = 1; i <= totalRequests; i++) {
-        const idempotencyKey = `concurrency_withdraw_req_${i}_${Date.now()}`;
-        promises.push(
-            new Promise((resolve) => {
-                try {
-                    const result = ledgerService.withdraw({
-                        accountId: testAccount.id,
-                        amount: withdrawalAmount,
-                        idempotencyKey,
-                        description: `Parallel withdrawal #${i}`,
-                        actor: { userId: alice.id, username: alice.username, role: 'ACCOUNT_HOLDER' }
-                    });
-                    resolve({ status: 'SUCCESS', result });
-                } catch (err) {
-                    resolve({ status: 'FAILURE', error: err.message });
-                }
-            })
-        );
-    }
+    const promises = Array.from({ length: TOTAL_PARALLEL }, (_, i) =>
+        ledgerService.withdraw({
+            accountId: testAcc.id,
+            amount: WITHDRAW_AMOUNT,
+            idempotencyKey: `parallel_wdl_${i}`,
+            description: `Parallel withdrawal #${i}`,
+            actor: alice
+        }).then(res => ({ ok: true, res }))
+          .catch(err => ({ ok: false, error: err.message }))
+    );
 
-    const results = await Promise.all(promises);
+    const outcomes = await Promise.all(promises);
+    const succeeded = outcomes.filter(o => o.ok);
+    const failed = outcomes.filter(o => !o.ok);
 
-    const successCount = results.filter(r => r.status === 'SUCCESS').length;
-    const failureCount = results.filter(r => r.status === 'FAILURE').length;
-    const insufficientFundsCount = results.filter(r => r.status === 'FAILURE' && r.error === 'INSUFFICIENT_FUNDS').length;
+    console.log(`Results: ${succeeded.length} Succeeded, ${failed.length} Failed (${failed.filter(f => f.error === 'INSUFFICIENT_FUNDS').length} INSUFFICIENT_FUNDS)`);
 
-    console.log(`Results: ${successCount} Succeeded, ${failureCount} Failed (${insufficientFundsCount} INSUFFICIENT_FUNDS)`);
+    assert.strictEqual(succeeded.length, 10, 'Exactly 10 withdrawals of $10 should succeed from $100 balance');
+    assert.strictEqual(failed.length, 90, 'Exactly 90 withdrawals must fail');
+    assert.ok(failed.every(f => f.error === 'INSUFFICIENT_FUNDS'), 'All failed attempts must fail with INSUFFICIENT_FUNDS');
 
-    // Verify account state
-    const finalAccountState = accountService.getAccountById(testAccount.id);
-    console.log(`Final account balance: $${finalAccountState.balance / 100}`);
+    const finalAccount = await accountService.getAccountById(testAcc.id);
+    console.log(`Final account balance: $${(finalAccount.balance / 100).toFixed(2)}`);
+    assert.strictEqual(finalAccount.balance, 0, 'Final account balance must be exactly 0 (never negative)');
 
-    // Assertions
-    assert.strictEqual(successCount, 10, 'Exactly 10 withdrawals of $10 must succeed from a $100 balance');
-    assert.strictEqual(failureCount, 90, 'Exactly 90 withdrawals must fail');
-    assert.strictEqual(finalAccountState.balance, 0, 'Final balance must be exactly $0.00');
-    assert(finalAccountState.balance >= 0, 'Balance must NEVER be negative under any circumstances!');
+    const conservation = await ledgerService.verifyConservation();
+    assert.strictEqual(conservation.is_valid, true, 'Ledger conservation must remain intact after concurrent load');
 
-    // Verify ledger conservation
-    const conservation = ledgerService.verifyConservation();
-    assert.strictEqual(conservation.is_valid, true, 'Ledger must remain 100% balanced after 100 concurrent requests');
-    assert.strictEqual(conservation.ledger_stats.difference, 0, 'Sum of Debits - Sum of Credits must be 0');
-
+    await db.close();
     console.log('✓ PASS: Concurrency Protection prevents race conditions & negative balances!');
-    return true;
-}
-
-if (require.main === module) {
-    testConcurrency().catch(err => {
-        console.error('Test failed:', err);
-        process.exit(1);
-    });
 }
 
 module.exports = { testConcurrency };
-

@@ -4,6 +4,7 @@ const { Readable, Writable } = require('node:stream');
 const { getDatabase } = require('../src/db/database');
 const { createServer } = require('../src/server');
 const { RateLimiter } = require('../src/middleware/rateLimiter');
+const { TEST_PASSWORDS } = require('./testFixtures');
 
 /**
  * In-process HTTP dispatcher using Node streams (`server.emit('request', req, res)`)
@@ -89,7 +90,7 @@ async function testHttpE2E() {
 
     // Fresh in-memory DB without manual seeding tests auto-seed on createServer()
     const db = getDatabase(':memory:', true);
-    const server = createServer(db);
+    const server = createServer(db, { seedPasswords: TEST_PASSWORDS });
 
     // 1. Health, Readiness, Bootstrap Status & Auto-Seeded Conservation
     const health = await dispatchHttp(server, { method: 'GET', path: '/api/health' });
@@ -401,6 +402,7 @@ async function testHttpE2E() {
     // 8. Rate Limiter Enforcement (429 + Retry-After)
     const strictDb = getDatabase(':memory:', true);
     const strictServer = createServer(strictDb, {
+        seedPasswords: TEST_PASSWORDS,
         authLimiter: new RateLimiter({ windowMs: 60000, max: 2 })
     });
 

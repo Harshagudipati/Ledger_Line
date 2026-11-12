@@ -5,7 +5,11 @@
   "main": "backend/src/server.js",
   "scripts": {
     "start": "node backend/src/server.js",
+    "migrate": "node backend/src/db/migrate.js",
     "seed": "node backend/src/db/seed.js",
+    "setup:frontend": "npm --prefix frontend install",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
     "test": "node backend/tests/runTests.js",
     "test:concurrency": "node backend/tests/concurrency.test.js",
     "test:idempotency": "node backend/tests/idempotency.test.js",

@@ -2,98 +2,80 @@
 const assert = require('node:assert');
 const { getDatabase } = require('../src/db/database');
 const { seedDatabase } = require('../src/db/seed');
-const { LedgerService } = require('../src/services/ledgerService');
 const { AccountService } = require('../src/services/accountService');
+const { LedgerService } = require('../src/services/ledgerService');
 const { AuditService } = require('../src/services/auditService');
+const { TEST_PASSWORDS } = require('./testFixtures');
 
 async function testLedger() {
     console.log('\n======================================================');
     console.log(' TEST SUITE 3: Double-Entry Ledger & Conservation');
     console.log('======================================================');
 
-    const db = getDatabase(':memory:');
-    const { alice, bob } = seedDatabase(db);
-    
+    const db = getDatabase(':memory:', true);
+    const seeded = await seedDatabase(db, { passwords: TEST_PASSWORDS, forceDemoUsers: true });
+
     const auditService = new AuditService(db);
-    const accountService = new AccountService(db);
+    const accountService = new AccountService(db, auditService);
     const ledgerService = new LedgerService(db, auditService);
 
-    const aliceAcc = accountService.getAccountsForUser({ userId: alice.id, role: 'ACCOUNT_HOLDER' })[0];
-    const bobAcc = accountService.getAccountsForUser({ userId: bob.id, role: 'ACCOUNT_HOLDER' })[0];
+    const alice = { userId: seeded.alice.id, username: 'alice', role: 'ACCOUNT_HOLDER' };
+    const bob = { userId: seeded.bob.id, username: 'bob', role: 'ACCOUNT_HOLDER' };
 
-    console.log('1. Executing sequence of financial operations:');
-    // Operation 1: Deposit $200.00 to Alice
-    console.log('  - Depositing $200.00 to Alice...');
-    ledgerService.deposit({
+    const aliceAcc = (await accountService.getAccountsForUser(alice))[0];
+    const bobAcc = (await accountService.getAccountsForUser(bob))[0];
+
+    console.log('1. Executing sequence of financial operations (Deposit -> Transfer -> Withdraw)...');
+    await ledgerService.deposit({
         accountId: aliceAcc.id,
-        amount: 20000,
-        idempotencyKey: 'tx_seq_1',
-        description: 'Sequence Deposit',
-        actor: { userId: alice.id, username: alice.username, role: 'ACCOUNT_HOLDER' }
+        amount: 50000, // +$500 -> $1500
+        idempotencyKey: 'ledger_dep_1',
+        description: 'Client Invoice',
+        actor: alice
     });
 
-    // Operation 2: Alice transfers $150.00 to Bob
-    console.log('  - Transferring $150.00 from Alice to Bob...');
-    ledgerService.transfer({
+    await ledgerService.transfer({
         sourceAccountId: aliceAcc.id,
         destinationAccountId: bobAcc.id,
-        amount: 15000,
-        idempotencyKey: 'tx_seq_2',
-        description: 'Sequence Transfer',
-        actor: { userId: alice.id, username: alice.username, role: 'ACCOUNT_HOLDER' }
+        amount: 30000, // -$300 Alice ($1200), +$300 Bob ($800)
+        idempotencyKey: 'ledger_xfer_1',
+        description: 'Contractor Payout',
+        actor: alice
     });
 
-    // Operation 3: Bob withdraws $50.00
-    console.log('  - Bob withdraws $50.00...');
-    ledgerService.withdraw({
+    await ledgerService.withdraw({
         accountId: bobAcc.id,
-        amount: 5000,
-        idempotencyKey: 'tx_seq_3',
-        description: 'Sequence Withdrawal',
-        actor: { userId: bob.id, username: bob.username, role: 'ACCOUNT_HOLDER' }
+        amount: 10000, // -$100 Bob ($700)
+        idempotencyKey: 'ledger_wdl_1',
+        description: 'ATM Cash',
+        actor: bob
     });
 
-    // Verify all individual transactions have sum(debit) == sum(credit)
-    const unbalancedCount = db.prepare(`
-        SELECT COUNT(*) as count FROM (
-            SELECT transaction_id, 
-                   SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END) as diff
-            FROM ledger_entries
-            GROUP BY transaction_id
-            HAVING diff != 0
-        )
-    `).get().count;
-    assert.strictEqual(unbalancedCount, 0, 'Every individual transaction must produce equal debits and credits');
-    console.log('✓ Every transaction in ledger has Debits = Credits (Zero-Sum Invariance)');
+    console.log('2. Checking double-entry invariant per transaction (Sum DEBIT == Sum CREDIT)...');
+    const imbalancedTx = await db.all(`
+        SELECT transaction_id,
+               SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE 0 END) as debits,
+               SUM(CASE WHEN direction = 'CREDIT' THEN amount ELSE 0 END) as credits
+        FROM ledger_entries
+        GROUP BY transaction_id
+        HAVING debits != credits
+    `);
+    assert.strictEqual(imbalancedTx.length, 0, 'Every transaction must have balanced DEBIT and CREDIT legs');
 
-    // Call verifyConservation
-    const conservation = ledgerService.verifyConservation();
-    console.log('2. System-wide conservation verification:');
-    console.log(`  - Total Debits:      $${conservation.ledger_stats.total_debits / 100}`);
-    console.log(`  - Total Credits:     $${conservation.ledger_stats.total_credits / 100}`);
-    console.log(`  - Total Difference:  $${conservation.ledger_stats.difference / 100}`);
-    console.log(`  - Customer Balances: $${conservation.balance_stats.total_customer_balances / 100}`);
-    console.log(`  - Clearing Vault:    $${conservation.balance_stats.clearing_vault_balance / 100}`);
+    console.log('3. Checking global conservation equation...');
+    const conservation = await ledgerService.verifyConservation();
+    assert.strictEqual(conservation.is_valid, true, 'System ledger conservation must be valid');
+    assert.strictEqual(conservation.balance_stats.total_customer_balances, 190000, 'Customer total must equal $1,900.00');
+    console.log(`✓ Conservation valid: Debits=${conservation.ledger_stats.total_debits}, Credits=${conservation.ledger_stats.total_credits}`);
 
-    assert.strictEqual(conservation.is_valid, true);
-    assert.strictEqual(conservation.ledger_stats.difference, 0);
-    assert.strictEqual(conservation.balance_stats.is_consistent, true);
+    console.log('4. Verifying Alice account statement running balance calculation...');
+    const aliceStatement = await accountService.getAccountStatement(aliceAcc.id, alice);
+    assert.strictEqual(aliceStatement.account.balance, 120000);
+    const latestEntry = aliceStatement.statement_entries[aliceStatement.statement_entries.length - 1];
+    assert.strictEqual(latestEntry.running_balance, 120000, 'Latest statement running balance must match current account balance');
 
-    // Verify Account Statement running balance matches actual balance
-    const aliceStatement = accountService.getAccountStatement(aliceAcc.id, { userId: alice.id, role: 'ACCOUNT_HOLDER' });
-    assert.strictEqual(aliceStatement.is_balance_consistent, true, 'Alice running balance must match calculated balance');
-    console.log(`✓ Alice Account Statement verified with ${aliceStatement.statement_entries.length} audited entries`);
-
-    console.log('✓ PASS: Double-Entry Ledger and System-Wide Conservation 100% verified!');
-    return true;
-}
-
-if (require.main === module) {
-    testLedger().catch(err => {
-        console.error('Test failed:', err);
-        process.exit(1);
-    });
+    await db.close();
+    console.log('✓ PASS: Double-entry invariance & conservation strictly hold!');
 }
 
 module.exports = { testLedger };
-

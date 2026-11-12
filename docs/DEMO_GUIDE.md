@@ -6,81 +6,66 @@
 
 ---
 
-## 1. Quick Start (Zero Third-Party Dependency Installation Required)
+## 1. Quick Start
 
-This project is built using native Node.js (v20+ / v22+ / v24+) with zero external npm dependencies required for core database operations, cryptographic auth, transactions, and automated test execution.
-
-### Step 1: Initialize Seed Data *(optional — server auto-seeds on first start)*
+### Step 1: Configure Optional Environment Variables & Build UI
 ```bash
-node backend/src/db/seed.js
+cp .env.example .env    # Optional: set SEED_*_PASSWORD or use random generated credentials
+npm run setup:frontend  # Install React + Vite dependencies
+npm run build           # Build production SPA to frontend/dist/
 ```
 
-### Step 2: Run All 6 Automated Test Suites
+### Step 2: Run All 7 Automated Test Suites
 ```bash
 npm test
 ```
-*Executes 100-parallel-withdrawal concurrency protection, idempotency validation, double-entry conservation, RBAC & ownership checks, audit immutability triggers, and full end-to-end HTTP API verification.*
+*Executes 100-parallel-withdrawal concurrency protection, idempotency replay validation, double-entry conservation, RBAC & ownership isolation, append-only audit trigger immutability, HTTP E2E + rate limits, and session revocation / brute-force lockout / account close sweep / CSV export / migration runner checks.*
 
 ### Step 3: Launch the Full-Stack Web Application
 ```bash
-node backend/src/server.js
+npm start
 ```
-Open your browser at: **[http://localhost:8080](http://localhost:8080)**
+Watch startup console output for generated (or `.env`-configured) demo persona credentials (`alice`, `bob`, `admin`, `auditor`, `charlie`), then open **[http://localhost:8080](http://localhost:8080)**.
 
 ---
 
-## 2. Pre-Seeded Evaluation Personas
+## 2. Seeded Evaluation Personas
 
-| Persona | Role | Username | Password | Purpose |
-|---|---|---|---|---|
-| **Alice** | Account Holder | `alice` | `AlicePassword123!` | Primary customer account (\$1,000.00 initial balance) |
-| **Bob** | Account Holder | `bob` | `BobPassword123!` | Recipient customer account (\$500.00 initial balance) |
-| **Admin** | Administrator | `admin` | `AdminPassword123!` | System operator; approves onboarding and views metrics |
-| **Auditor** | Auditor | `auditor` | `AuditorPassword123!` | Read-only compliance; inspects ledger and audit trail |
-| **Charlie** | Account Holder | `charlie` | `CharliePassword123!` | Unapproved user (`PENDING_APPROVAL`) to demonstrate onboarding |
+| Persona | Role | Username | Purpose |
+|---|---|---|---|
+| **Alice** | `ACCOUNT_HOLDER` | `alice` | Primary customer account (\$1,000.00 initial balance) |
+| **Bob** | `ACCOUNT_HOLDER` | `bob` | Recipient customer account (\$500.00 initial balance) |
+| **Admin** | `ADMIN` | `admin` | System operator; approves/unlocks users, freezes accounts & views telemetry |
+| **Auditor** | `AUDITOR` | `auditor` | Read-only compliance; inspects ledger, audit trail & CSV exports |
+| **Charlie** | `ACCOUNT_HOLDER` | `charlie` | Starts in `PENDING_APPROVAL` to demonstrate onboarding approval |
 
 > [!NOTE]
-> **Real Login Gate & Role Isolation:** LedgerLine enforces strict session authentication (`FR-1` / `FR-2`). Open `http://localhost:8080` to reach the **Sign In / Register / First-Admin Bootstrap** page, sign in with one set of credentials, and click **Sign Out** when testing a different role. Each role only sees the portal tabs it is authorized to access.
+> **Real Login Gate, No Secret Baking & Session Revocation:** LedgerLine ships with **zero hardcoded passwords** in source control. Configure known evaluation passwords via `.env` (`SEED_*_PASSWORD`) or copy the randomly generated passwords printed on first startup. Signing out invokes `POST /api/auth/logout`, adding the JWT `jti` to `revoked_tokens`.
 
 ---
 
 ## 3. Step-by-Step Feature Walkthrough
 
-### Scenario A: Concurrency Protection (100 Parallel Withdrawals)
-1. In the Web UI, click the **100-Parallel Stress Test** tab.
-2. Click **"Fire 100 Parallel Requests Now"**.
-3. Watch 100 parallel requests fire simultaneously:
-   - Exactly the permitted number of withdrawals succeed.
-   - All subsequent withdrawals fail with `INSUFFICIENT_FUNDS`.
-   - The final balance never drops below \$0.00.
-   - The live conservation verification badge confirms the ledger remains 100% balanced!
+### Scenario A: Account Holder Money Movement, Idempotency Replay & Statement Filters
+1. Sign in as **alice** on the React Sign In screen.
+2. Execute a **Deposit** or **Transfer** to **bob** (pick from the privacy-preserving recipients dropdown or enter Bob's `ACC-...` number).
+3. Click **"Replay Last Key"** inside the `Idempotency-Key` box and submit again — verify the UI receives the cached transaction without double-charging Alice (`Recent Idempotency Keys` updates cleanly).
+4. Filter the **Account Statement & Running Balance** table by `Type`, date range, or search keyword while confirming true chronological running balances remain `VERIFIED`.
+5. Click **"Open Account"** (`SAVINGS`), deposit funds, then test **"Close Account"** with atomic balance sweep back into Alice's primary Checking account!
 
-### Scenario B: Cross-User Transfers & Idempotency Replay (FR-11, FR-15)
-1. Log in as **Alice**.
-2. Click **Transfer Money** — pick **Bob** from the privacy-preserving recipients dropdown (or enter Bob's `ACC-...` number directly) and submit.
-3. Click **Deposit Funds** or **Transfer Money** again and notice the **"Idempotency Replay Ready"** card appears showing the exact `Idempotency-Key` UUID.
-4. Click **"Replay Identical Request"** to verify the backend returns the cached response (`isCached: true`) without double-charging Alice's account!
-5. Click **Export CSV** in the Account Statement card to download the reconciled ledger statement.
+### Scenario B: Onboarding, Brute-Force Lockout & Account Freeze (`ADMIN`)
+1. On the Sign In page, try signing in as `charlie` (blocked with `ACCOUNT_PENDING_APPROVAL`), or try 5 wrong passwords on a test user to observe `429 ACCOUNT_TEMPORARILY_LOCKED`.
+2. Sign in as **admin** to view **Admin Console**:
+   - View live KPI cards & `/api/metrics` telemetry (`dbDialect`, `rateLimitBackend`, latency).
+   - Click **Approve** / **Unlock / Activate** on pending or locked users.
+   - Click **Freeze** on any customer account to block debits/credits with `ACCOUNT_NOT_ACTIVE`, then **Unfreeze**.
+   - Click **Reset Demo State** to restore baseline balances while preserving every immutable audit row.
 
-### Scenario C: User Onboarding, Admin Provisioning & Account Freeze (FR-6, FR-7, FR-9)
-1. On the Sign In page, try signing in as `charlie` / `CharliePassword123!` — notice the system rejects login (`ACCOUNT_PENDING_APPROVAL`), or submit a brand-new user on the **Register Holder** tab.
-2. Sign in as `admin` (`AdminPassword123!`) to open the **Administrator** workspace.
-3. Click **Approve / Activate** on Charlie (an initial `CHECKING` account is auto-provisioned).
-4. Click **Sign Out** and log in as `charlie` — login now succeeds!
-5. When signed in as `admin`, use **Platform Accounts & Status Controls** to **Freeze** an account (blocking debits/credits with `FROZEN`), or **Reset Demo DB** to restore initial balances cleanly while keeping append-only `audit_logs` intact.
+### Scenario C: Double-Entry Conservation & CSV Compliance Export (`AUDITOR`)
+1. Sign out (revoking Admin JWT server-side) and sign in as **auditor** (or switch to the **Audit & Ledger** tab as Admin).
+2. Inspect the global Conservation Proof ($\Delta = \$0.00$), search/filter `audit_logs`, and click **Export CSV** to download `ledgerline-audit-logs.csv`.
+3. Filter the **Double-Entry Ledger Entries Inspector** by transaction type or `DEBIT`/`CREDIT` leg.
 
-### Scenario D: Double-Entry Ledger & Conservation (Auditor View)
-1. Click **Sign Out** and log in as `auditor` (`AuditorPassword123!`) to enter the read-only **Auditor & Double-Entry Ledger** portal.
-2. Review the live conservation cards: Total Debits, Total Credits, Clearing Vault Liability vs. Customer Equity, and Imbalance ($\Delta = \$0.00$).
-3. Filter raw double-entry ledger lines by **Type** or **DEBIT/CREDIT** direction, and filter the **Immutable Audit Trail** by `SUCCESS`, `FAILURE`, or `UNAUTHORIZED`.
-
----
-
-## 4. API Health, Documentation & Deployment
-
-- **Health Check**: `GET http://localhost:8080/api/health` (public)
-- **Readiness Check**: `GET http://localhost:8080/api/ready` (public)
-- **System Conservation**: `GET http://localhost:8080/api/ledger/conservation` (Requires Bearer token)
-- **REST API Reference**: [`docs/API.md`](./API.md)
-- **Cloud & PostgreSQL Deployment Guide**: [`docs/DEPLOYMENT.md`](./DEPLOYMENT.md)
-
+### Scenario D: Self-Service Password Rotation
+1. Click **Password** in the sticky top header from any authenticated session.
+2. Update your password via `POST /api/auth/change-password` — the backend revokes the previous JWT and rotates a fresh token into your browser automatically.

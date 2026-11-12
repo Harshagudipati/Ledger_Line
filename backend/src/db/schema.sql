@@ -1,10 +1,16 @@
 -- ============================================================================
--- LedgerLine / BalanceVault Database Schema
+-- LedgerLine / BalanceVault Database Schema (SQLite)
 -- Multi-Role, Double-Entry Accounting, Idempotent, Append-Only Audit Trail
 -- ============================================================================
 
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
+
+-- 0. Schema Migrations Tracking Table
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version TEXT PRIMARY KEY,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
 -- 1. Users Table (Admin, Account Holder, Auditor)
 CREATE TABLE IF NOT EXISTS users (
@@ -15,11 +21,21 @@ CREATE TABLE IF NOT EXISTS users (
     password_salt TEXT NOT NULL,
     role TEXT NOT NULL CHECK(role IN ('ADMIN', 'ACCOUNT_HOLDER', 'AUDITOR')),
     status TEXT NOT NULL CHECK(status IN ('PENDING_APPROVAL', 'ACTIVE', 'DEACTIVATED')) DEFAULT 'PENDING_APPROVAL',
+    failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+    locked_until TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 2. Accounts Table
+-- 2. Revoked JWT Tokens Table (Server-Side Logout / Session Invalidation)
+CREATE TABLE IF NOT EXISTS revoked_tokens (
+    jti TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TIMESTAMP NOT NULL,
+    revoked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3. Accounts Table
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY,
     account_number TEXT UNIQUE NOT NULL,
@@ -33,7 +49,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 3. Transactions Table
+-- 4. Transactions Table
 CREATE TABLE IF NOT EXISTS transactions (
     id TEXT PRIMARY KEY,
     type TEXT NOT NULL CHECK(type IN ('DEPOSIT', 'WITHDRAWAL', 'TRANSFER')),
@@ -47,9 +63,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 4. Double-Entry Ledger Entries Table
--- Double-entry rule: Every transaction generates at least two entries:
--- Total debits must equal total credits.
+-- 5. Double-Entry Ledger Entries Table
 CREATE TABLE IF NOT EXISTS ledger_entries (
     id TEXT PRIMARY KEY,
     transaction_id TEXT NOT NULL REFERENCES transactions(id) ON DELETE RESTRICT,
@@ -59,7 +73,7 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 5. Idempotency Keys Registry Table
+-- 6. Idempotency Keys Registry Table
 CREATE TABLE IF NOT EXISTS idempotency_keys (
     key TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id),
@@ -72,7 +86,7 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
     expires_at TIMESTAMP NOT NULL
 );
 
--- 6. Append-Only Audit Trail Table
+-- 7. Append-Only Audit Trail Table
 CREATE TABLE IF NOT EXISTS audit_logs (
     id TEXT PRIMARY KEY,
     actor_id TEXT,
@@ -100,10 +114,10 @@ BEGIN
     SELECT RAISE(ABORT, 'ILLEGAL_OPERATION: audit_logs is append-only and cannot be deleted.');
 END;
 
--- Indexes for lightning fast lookups
+-- Indexes for fast lookups
 CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner_id);
 CREATE INDEX IF NOT EXISTS idx_ledger_tx ON ledger_entries(transaction_id);
 CREATE INDEX IF NOT EXISTS idx_ledger_account ON ledger_entries(account_id);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_keys(expires_at);
-
+CREATE INDEX IF NOT EXISTS idx_revoked_expires ON revoked_tokens(expires_at);
