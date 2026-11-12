@@ -91,7 +91,7 @@ async function testHttpE2E() {
     const db = getDatabase(':memory:', true);
     const server = createServer(db);
 
-    // 1. Health, Readiness & Auto-Seeded Conservation
+    // 1. Health, Readiness, Bootstrap Status & Auto-Seeded Conservation
     const health = await dispatchHttp(server, { method: 'GET', path: '/api/health' });
     assert.strictEqual(health.statusCode, 200);
     assert.strictEqual(health.json.status, 'UP');
@@ -100,6 +100,27 @@ async function testHttpE2E() {
     assert.strictEqual(ready.statusCode, 200);
     assert.strictEqual(ready.json.status, 'READY');
     assert.strictEqual(ready.json.database, 'CONNECTED');
+
+    const bootStatusSeeded = await dispatchHttp(server, { method: 'GET', path: '/api/auth/bootstrap-status' });
+    assert.strictEqual(bootStatusSeeded.statusCode, 200);
+    assert.strictEqual(bootStatusSeeded.json.needsBootstrap, false);
+
+    // Also verify fresh blank database reports needsBootstrap: true and allows first-admin bootstrap
+    const blankDb = getDatabase(':memory:', true);
+    const blankServer = createServer(blankDb, { skipAutoSeed: true });
+    const bootStatusBlank = await dispatchHttp(blankServer, { method: 'GET', path: '/api/auth/bootstrap-status' });
+    assert.strictEqual(bootStatusBlank.statusCode, 200);
+    assert.strictEqual(bootStatusBlank.json.needsBootstrap, true);
+    const bootInit = await dispatchHttp(blankServer, {
+        method: 'POST',
+        path: '/api/auth/bootstrap',
+        body: { username: 'root_admin', email: 'root@example.com', password: 'RootPassword123!' }
+    });
+    assert.strictEqual(bootInit.statusCode, 200);
+    assert.strictEqual(bootInit.json.role, 'ADMIN');
+    const bootStatusAfter = await dispatchHttp(blankServer, { method: 'GET', path: '/api/auth/bootstrap-status' });
+    assert.strictEqual(bootStatusAfter.json.needsBootstrap, false);
+    blankDb.close();
 
     const unauthConservation = await dispatchHttp(server, { method: 'GET', path: '/api/ledger/conservation' });
     assert.strictEqual(unauthConservation.statusCode, 401);

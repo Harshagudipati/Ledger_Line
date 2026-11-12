@@ -39,8 +39,8 @@ Open your browser at: **[http://localhost:8080](http://localhost:8080)**
 | **Auditor** | Auditor | `auditor` | `AuditorPassword123!` | Read-only compliance; inspects ledger and audit trail |
 | **Charlie** | Account Holder | `charlie` | `CharliePassword123!` | Unapproved user (`PENDING_APPROVAL`) to demonstrate onboarding |
 
-> [!TIP]
-> **One-Click Persona Switcher:** The top navigation bar in the web UI provides one-click buttons to instantly log in as any of these personas.
+> [!NOTE]
+> **Real Login Gate & Role Isolation:** LedgerLine enforces strict session authentication (`FR-1` / `FR-2`). Open `http://localhost:8080` to reach the **Sign In / Register / First-Admin Bootstrap** page, sign in with one set of credentials, and click **Sign Out** when testing a different role. Each role only sees the portal tabs it is authorized to access.
 
 ---
 
@@ -63,13 +63,14 @@ Open your browser at: **[http://localhost:8080](http://localhost:8080)**
 5. Click **Export CSV** in the Account Statement card to download the reconciled ledger statement.
 
 ### Scenario C: User Onboarding, Admin Provisioning & Account Freeze (FR-6, FR-7, FR-9)
-1. Try clicking the **Charlie (Pending)** persona button — notice the system rejects login (`ACCOUNT_PENDING_APPROVAL`).
-2. Switch to **Admin** and open the **Administrator** tab.
-3. Click **Approve / Activate** on Charlie (an initial `CHECKING` account is auto-provisioned). Switch back to **Charlie** — login now succeeds!
-4. Under **All Customer Accounts (Freeze / Close Controls)**, click **Freeze** on an account to block debits/credits (`FROZEN`), or **Reset Demo DB** to restore initial balances cleanly while keeping append-only `audit_logs` intact.
+1. On the Sign In page, try signing in as `charlie` / `CharliePassword123!` — notice the system rejects login (`ACCOUNT_PENDING_APPROVAL`), or submit a brand-new user on the **Register Holder** tab.
+2. Sign in as `admin` (`AdminPassword123!`) to open the **Administrator** workspace.
+3. Click **Approve / Activate** on Charlie (an initial `CHECKING` account is auto-provisioned).
+4. Click **Sign Out** and log in as `charlie` — login now succeeds!
+5. When signed in as `admin`, use **Platform Accounts & Status Controls** to **Freeze** an account (blocking debits/credits with `FROZEN`), or **Reset Demo DB** to restore initial balances cleanly while keeping append-only `audit_logs` intact.
 
 ### Scenario D: Double-Entry Ledger & Conservation (Auditor View)
-1. Switch to the **Auditor** persona and open the **Auditor & Double-Entry Ledger** tab.
+1. Click **Sign Out** and log in as `auditor` (`AuditorPassword123!`) to enter the read-only **Auditor & Double-Entry Ledger** portal.
 2. Review the live conservation cards: Total Debits, Total Credits, Clearing Vault Liability vs. Customer Equity, and Imbalance ($\Delta = \$0.00$).
 3. Filter raw double-entry ledger lines by **Type** or **DEBIT/CREDIT** direction, and filter the **Immutable Audit Trail** by `SUCCESS`, `FAILURE`, or `UNAUTHORIZED`.
 

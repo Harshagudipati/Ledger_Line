@@ -129,3 +129,4 @@ CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_keys(expires_a
 -- CREATE ROLE ledgerline_bootstrap NOINHERIT LOGIN PASSWORD 'replace-with-strong-secret';
 -- GRANT INSERT, SELECT ON users TO ledgerline_bootstrap;
 -- GRANT INSERT ON audit_logs TO ledgerline_bootstrap;
+

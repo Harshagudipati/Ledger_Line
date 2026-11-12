@@ -1,16 +1,22 @@
 /**
  * LedgerLine / BalanceVault Frontend Application
- * Connects to the zero-dependency Node.js backend REST API.
+ * Role-scoped financial portal with a dedicated Login / Register / Bootstrap gate.
+ * Zero hardcoded credentials in client code; all authorization enforced server-side.
  */
 
 const API_BASE = '/api';
 
-const DEMO_PASSWORDS = {
-    alice: 'AlicePassword123!',
-    bob: 'BobPassword123!',
-    charlie: 'CharliePassword123!',
-    admin: 'AdminPassword123!',
-    auditor: 'AuditorPassword123!'
+const ROLE_TABS = {
+    ACCOUNT_HOLDER: ['holder-tab', 'concurrency-tab'],
+    ADMIN: ['admin-tab', 'auditor-tab'],
+    AUDITOR: ['auditor-tab']
+};
+
+const TAB_BUTTON_MAP = {
+    'holder-tab': 'tab-btn-holder',
+    'admin-tab': 'tab-btn-admin',
+    'auditor-tab': 'tab-btn-auditor',
+    'concurrency-tab': 'tab-btn-concurrency'
 };
 
 const state = {
@@ -19,8 +25,8 @@ const state = {
     accounts: [],
     activeAccountId: null,
     lastTransaction: null,
-    authMode: 'login', // 'login' | 'register'
-    currentTab: 'holder-tab',
+    authMode: 'login', // 'login' | 'register' | 'bootstrap'
+    currentTab: null,
     lastStatementTransactions: []
 };
 
@@ -114,6 +120,10 @@ async function apiRequest(path, options = {}) {
     }
 
     if (!res.ok) {
+        if (res.status === 401 && !options.skipAuth && state.token) {
+            clearSessionState();
+            showAuthScreen();
+        }
         const err = new Error(data.message || `Request failed with status ${res.status}`);
         err.status = res.status;
         err.code = data.error || 'REQUEST_ERROR';
@@ -125,66 +135,196 @@ async function apiRequest(path, options = {}) {
 }
 
 // ============================================================================
-// INITIALIZATION & HEALTH CHECK
+// INITIALIZATION, HEALTH & AUTHENTICATION GATE
 // ============================================================================
 
 window.addEventListener('DOMContentLoaded', async () => {
-    await checkSystemHealth();
+    await Promise.all([checkSystemHealth(), checkBootstrapAvailability()]);
 
     if (state.token) {
         try {
             const me = await apiRequest('/auth/me');
-            state.user = me.user;
-            onAuthSuccess();
-            return;
+            if (me && me.user) {
+                state.user = me.user;
+                onAuthSuccess();
+                return;
+            }
         } catch {
             clearSessionState();
         }
     }
 
-    // Default to Alice on initial page load for instant challenge demo UX
-    await loginAs('alice', { silent: true });
+    showAuthScreen();
 });
 
 async function checkSystemHealth() {
-    const healthEl = document.getElementById('api-health-text');
+    const dashboardHealthEl = document.getElementById('api-health-text');
+    const loginHealthEl = document.getElementById('login-api-health-text');
     try {
         const data = await apiRequest('/health', { skipAuth: true });
-        if (healthEl) {
-            healthEl.textContent = data.status || 'UP';
-            healthEl.className = 'text-emerald-700';
+        const statusText = data.status || 'UP';
+        if (dashboardHealthEl) {
+            dashboardHealthEl.textContent = statusText;
+            dashboardHealthEl.className = 'text-emerald-700';
+        }
+        if (loginHealthEl) {
+            loginHealthEl.textContent = statusText;
+            loginHealthEl.className = 'text-emerald-400';
         }
     } catch {
-        if (healthEl) {
-            healthEl.textContent = 'DOWN';
-            healthEl.className = 'text-rose-700';
+        if (dashboardHealthEl) {
+            dashboardHealthEl.textContent = 'DOWN';
+            dashboardHealthEl.className = 'text-rose-700';
+        }
+        if (loginHealthEl) {
+            loginHealthEl.textContent = 'DOWN';
+            loginHealthEl.className = 'text-rose-400';
         }
     }
 }
 
-// ============================================================================
-// AUTHENTICATION & PERSONA SWITCHING
-// ============================================================================
-
-function clearSessionState() {
-    state.token = null;
-    state.user = null;
-    state.accounts = [];
-    state.activeAccountId = null;
-    state.lastTransaction = null;
-    state.lastStatementTransactions = [];
-    localStorage.removeItem('ledgerline_token');
+async function checkBootstrapAvailability() {
+    const bootstrapTab = document.getElementById('auth-tab-bootstrap');
+    if (!bootstrapTab) return;
+    try {
+        const data = await apiRequest('/auth/bootstrap-status', { skipAuth: true });
+        if (data.needsBootstrap) {
+            bootstrapTab.classList.remove('hidden');
+            setAuthScreenMode('bootstrap');
+        } else {
+            bootstrapTab.classList.add('hidden');
+        }
+    } catch {
+        bootstrapTab.classList.add('hidden');
+    }
 }
 
-async function loginAs(persona, opts = {}) {
-    const username = persona.toLowerCase();
-    const password = DEMO_PASSWORDS[username];
-    if (!password) {
-        showToast(`Unknown demo persona: ${persona}`, 'error');
-        return false;
+function showAuthScreen() {
+    closeModals();
+    const authScreen = document.getElementById('auth-screen');
+    const dashShell = document.getElementById('dashboard-shell');
+    if (dashShell) dashShell.classList.add('hidden');
+    if (authScreen) authScreen.classList.remove('hidden');
+
+    const pwInput = document.getElementById('login-password-input');
+    if (pwInput) pwInput.value = '';
+    checkBootstrapAvailability();
+}
+
+function showDashboardShell() {
+    const authScreen = document.getElementById('auth-screen');
+    const dashShell = document.getElementById('dashboard-shell');
+    if (authScreen) authScreen.classList.add('hidden');
+    if (dashShell) dashShell.classList.remove('hidden');
+}
+
+function setAuthFeedback(message, type = 'error') {
+    const banner = document.getElementById('auth-feedback-banner');
+    if (!banner) return;
+
+    if (!message) {
+        banner.classList.add('hidden');
+        banner.textContent = '';
+        return;
     }
 
+    const styles = {
+        error: 'bg-rose-50 border-rose-200 text-rose-800',
+        warning: 'bg-amber-50 border-amber-200 text-amber-800',
+        success: 'bg-emerald-50 border-emerald-200 text-emerald-800'
+    };
+
+    banner.className = `mb-4 p-3 rounded-xl border text-xs leading-relaxed ${styles[type] || styles.error}`;
+    banner.textContent = message;
+    banner.classList.remove('hidden');
+}
+
+function setAuthScreenMode(mode) {
+    state.authMode = mode;
+    setAuthFeedback('');
+
+    const modes = ['login', 'register', 'bootstrap'];
+    modes.forEach(m => {
+        const btn = document.getElementById(`auth-tab-${m}`);
+        if (!btn) return;
+        if (m === mode) {
+            btn.classList.remove('border-transparent', 'text-slate-500', 'text-amber-600');
+            btn.classList.add('border-teal-600', 'text-teal-700');
+        } else {
+            btn.classList.remove('border-teal-600', 'text-teal-700');
+            btn.classList.add('border-transparent', m === 'bootstrap' ? 'text-amber-600' : 'text-slate-500');
+        }
+    });
+
+    const emailContainer = document.getElementById('login-email-container');
+    const emailInput = document.getElementById('login-email-input');
+    const pwInput = document.getElementById('login-password-input');
+    const titleEl = document.getElementById('login-screen-title');
+    const subEl = document.getElementById('login-screen-subtitle');
+    const btnLabel = document.getElementById('login-submit-label');
+
+    const needsEmail = mode === 'register' || mode === 'bootstrap';
+    emailContainer.classList.toggle('hidden', !needsEmail);
+    emailInput.required = needsEmail;
+    pwInput.autocomplete = mode === 'login' ? 'current-password' : 'new-password';
+
+    if (mode === 'login') {
+        titleEl.textContent = 'Sign in to your workspace';
+        subEl.textContent = 'Enter your credentials. Your workspace tabs adapt strictly to your role.';
+        btnLabel.textContent = 'Sign In';
+    } else if (mode === 'register') {
+        titleEl.textContent = 'Register new Account Holder';
+        subEl.textContent = 'Self-registered users require Administrator approval (FR-6 / FR-7) before signing in.';
+        btnLabel.textContent = 'Submit Registration Request';
+    } else {
+        titleEl.textContent = 'First-Admin Bootstrap Setup (FR-4)';
+        subEl.textContent = 'Initialize the very first platform Administrator account on an empty database.';
+        btnLabel.textContent = 'Create First Administrator';
+    }
+}
+
+async function handleAuthScreenSubmit(event) {
+    event.preventDefault();
+    setAuthFeedback('');
+
+    const username = document.getElementById('login-username-input').value.trim();
+    const email = document.getElementById('login-email-input').value.trim();
+    const password = document.getElementById('login-password-input').value;
+
     try {
+        if (state.authMode === 'register') {
+            await apiRequest('/auth/register', {
+                method: 'POST',
+                skipAuth: true,
+                body: JSON.stringify({ username, email, password })
+            });
+            document.getElementById('login-password-input').value = '';
+            setAuthScreenMode('login');
+            setAuthFeedback(
+                `Registration submitted for "${username}" with PENDING_APPROVAL status. Sign in as an Administrator to approve and provision their account.`,
+                'success'
+            );
+            showToast(`Registration request created for ${username}.`, 'success');
+            return;
+        }
+
+        if (state.authMode === 'bootstrap') {
+            await apiRequest('/auth/bootstrap', {
+                method: 'POST',
+                skipAuth: true,
+                body: JSON.stringify({ username, email, password })
+            });
+            document.getElementById('login-password-input').value = '';
+            await checkBootstrapAvailability();
+            setAuthScreenMode('login');
+            setAuthFeedback(
+                `First Administrator "${username}" bootstrapped cleanly! You can now sign in with those credentials.`,
+                'success'
+            );
+            showToast(`Administrator "${username}" initialized.`, 'success');
+            return;
+        }
+
         const data = await apiRequest('/auth/login', {
             method: 'POST',
             skipAuth: true,
@@ -193,30 +333,37 @@ async function loginAs(persona, opts = {}) {
         state.token = data.token;
         state.user = data.user;
         localStorage.setItem('ledgerline_token', data.token);
+        document.getElementById('login-password-input').value = '';
         onAuthSuccess();
-
-        if (!opts.silent) {
-            showToast(`Signed in as ${data.user.username} (${data.user.role})`, 'success');
-        }
-        return true;
+        showToast(`Signed in as ${data.user.username} (${data.user.role})`, 'success');
     } catch (err) {
-        if (err.code === 'USER_NOT_ACTIVE' || err.status === 403) {
-            showToast(
-                `${username} is currently PENDING_APPROVAL. Switch to Admin to approve them first (FR-6 / FR-7)!`,
+        if (err.code === 'ACCOUNT_PENDING_APPROVAL') {
+            setAuthFeedback(
+                `Account "${username}" is PENDING_APPROVAL. Ask an Administrator to approve and activate your account first.`,
                 'warning'
             );
         } else {
-            showToast(`Login failed for ${username}: ${err.message}`, 'error');
+            setAuthFeedback(err.message, 'error');
         }
-        return false;
     }
+}
+
+function clearSessionState() {
+    state.token = null;
+    state.user = null;
+    state.accounts = [];
+    state.activeAccountId = null;
+    state.lastTransaction = null;
+    state.currentTab = null;
+    state.lastStatementTransactions = [];
+    localStorage.removeItem('ledgerline_token');
 }
 
 function logout() {
     clearSessionState();
-    updateHeaderUI();
-    renderSignedOutUI();
-    showToast('Signed out of active session.', 'info');
+    showAuthScreen();
+    setAuthScreenMode('login');
+    setAuthFeedback('Signed out cleanly. Enter credentials to start a new session.', 'success');
 }
 
 function onAuthSuccess() {
@@ -224,39 +371,18 @@ function onAuthSuccess() {
     const replayCard = document.getElementById('idempotency-demo-card');
     if (replayCard) replayCard.classList.add('hidden');
 
+    showDashboardShell();
     updateHeaderUI();
+    applyRoleTabVisibility(state.user.role);
 
-    const unauthBanner = document.getElementById('holder-unauth-warning');
-    if (unauthBanner) unauthBanner.classList.add('hidden');
-
-    // Auto-select tab appropriate for the logged-in role
-    if (state.user.role === 'ADMIN') {
-        switchTab('admin-tab');
-    } else if (state.user.role === 'AUDITOR') {
-        switchTab('auditor-tab');
-    } else {
-        switchTab('holder-tab');
-    }
-
-    refreshActiveViews();
+    const allowedTabs = ROLE_TABS[state.user.role] || ['holder-tab'];
+    switchTab(allowedTabs[0]);
 }
 
 function updateHeaderUI() {
     const usernameEl = document.getElementById('current-username');
     const roleEl = document.getElementById('current-role-badge');
-
-    document.querySelectorAll('.persona-btn').forEach(btn => {
-        btn.classList.remove('ring-2', 'ring-teal-400', 'bg-slate-700');
-    });
-
-    if (!state.user) {
-        if (usernameEl) usernameEl.textContent = 'Signed Out';
-        if (roleEl) {
-            roleEl.textContent = 'GUEST';
-            roleEl.className = 'px-2 py-0.5 rounded text-[11px] font-bold uppercase tracking-wide bg-slate-200 text-slate-700 border border-slate-300';
-        }
-        return;
-    }
+    if (!state.user) return;
 
     if (usernameEl) usernameEl.textContent = state.user.username;
 
@@ -268,55 +394,45 @@ function updateHeaderUI() {
 
     if (roleEl) {
         roleEl.textContent = state.user.role;
-        roleEl.className = `px-2 py-0.5 rounded text-[11px] font-bold uppercase tracking-wide border ${roleStyles[state.user.role] || roleStyles.ACCOUNT_HOLDER}`;
-    }
-
-    const activeBtn = document.getElementById(`btn-${state.user.username.toLowerCase()}`);
-    if (activeBtn) {
-        activeBtn.classList.add('ring-2', 'ring-teal-400', 'bg-slate-700');
+        roleEl.className = `px-2.5 py-1 rounded-lg text-[11px] font-bold uppercase tracking-wide border ${roleStyles[state.user.role] || roleStyles.ACCOUNT_HOLDER}`;
     }
 }
 
-function renderSignedOutUI() {
-    const unauthBanner = document.getElementById('holder-unauth-warning');
-    if (unauthBanner) unauthBanner.classList.remove('hidden');
-
-    const select = document.getElementById('user-accounts-select');
-    if (select) select.innerHTML = '<option value="">Not signed in</option>';
-
-    document.getElementById('account-type-badge').textContent = 'SIGNED OUT';
-    document.getElementById('account-number-display').textContent = '---';
-    document.getElementById('account-status-badge').textContent = '---';
-    document.getElementById('account-balance-display').textContent = '$0.00';
-    document.getElementById('stress-current-balance').textContent = '$0.00';
-    document.getElementById('statement-table-body').innerHTML =
-        '<tr><td colspan="6" class="py-8 text-center text-slate-400">Sign in to view account statement.</td></tr>';
+function applyRoleTabVisibility(role) {
+    const allowed = ROLE_TABS[role] || [];
+    Object.entries(TAB_BUTTON_MAP).forEach(([tabId, btnId]) => {
+        const btn = document.getElementById(btnId);
+        if (!btn) return;
+        btn.classList.toggle('hidden', !allowed.includes(tabId));
+    });
 }
 
 // ============================================================================
-// NAVIGATION TABS & ROLE BANNERS
+// NAVIGATION TABS & ACTIVE VIEW REFRESH
 // ============================================================================
 
 function switchTab(tabId) {
+    if (!state.user) {
+        showAuthScreen();
+        return;
+    }
+
+    const allowed = ROLE_TABS[state.user.role] || [];
+    if (!allowed.includes(tabId)) {
+        tabId = allowed[0];
+    }
     state.currentTab = tabId;
 
     document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
     const target = document.getElementById(tabId);
     if (target) target.classList.remove('hidden');
 
-    const tabButtonMap = {
-        'holder-tab': 'tab-btn-holder',
-        'admin-tab': 'tab-btn-admin',
-        'auditor-tab': 'tab-btn-auditor',
-        'concurrency-tab': 'tab-btn-concurrency'
-    };
-
     document.querySelectorAll('.tab-button').forEach(btn => {
         btn.classList.remove('border-teal-600', 'text-teal-600');
         btn.classList.add('border-transparent', 'text-slate-500');
     });
 
-    const activeTabBtn = document.getElementById(tabButtonMap[tabId]);
+    const activeTabBtn = document.getElementById(TAB_BUTTON_MAP[tabId]);
     if (activeTabBtn) {
         activeTabBtn.classList.remove('border-transparent', 'text-slate-500');
         activeTabBtn.classList.add('border-teal-600', 'text-teal-600');
@@ -326,12 +442,8 @@ function switchTab(tabId) {
 }
 
 async function refreshActiveViews() {
+    if (!state.user) return;
     await verifyLedgerConservation();
-
-    if (!state.user) {
-        renderSignedOutUI();
-        return;
-    }
 
     const adminWarning = document.getElementById('admin-role-warning');
     const auditorWarning = document.getElementById('auditor-role-warning');
@@ -372,16 +484,15 @@ async function loadUserAccounts() {
             state.activeAccountId = null;
             select.innerHTML = '<option value="">No accounts yet — click Open Secondary Account</option>';
             document.getElementById('account-type-badge').textContent = 'NO ACCOUNT';
-            document.getElementById('account-number-display').textContent = 'Create an account to begin';
+            document.getElementById('account-number-display').textContent = 'Open an account to begin';
             document.getElementById('account-status-badge').textContent = '---';
             document.getElementById('account-balance-display').textContent = '$0.00';
             document.getElementById('stress-current-balance').textContent = '$0.00';
             document.getElementById('statement-table-body').innerHTML =
-                '<tr><td colspan="6" class="py-8 text-center text-slate-400">No accounts found for this user.</td></tr>';
+                '<tr><td colspan="7" class="py-8 text-center text-slate-400">No accounts found for this user.</td></tr>';
             return;
         }
 
-        // Preserve active account if still in list
         if (!state.accounts.some(a => a.id === state.activeAccountId)) {
             state.activeAccountId = state.accounts[0].id;
         }
@@ -415,11 +526,11 @@ async function switchActiveAccount(accountId) {
     if (statusBadge) {
         statusBadge.textContent = acc.status;
         if (acc.status === 'ACTIVE') {
-            statusBadge.className = 'text-[11px] font-bold uppercase px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/40 text-emerald-200';
+            statusBadge.className = 'inline-flex items-center gap-1 text-xs font-bold uppercase px-2 py-0.5 rounded bg-emerald-950/80 border border-emerald-500/30 text-emerald-300';
         } else if (acc.status === 'FROZEN') {
-            statusBadge.className = 'text-[11px] font-bold uppercase px-2 py-0.5 rounded bg-amber-500/20 border border-amber-400/40 text-amber-200';
+            statusBadge.className = 'inline-flex items-center gap-1 text-xs font-bold uppercase px-2 py-0.5 rounded bg-amber-950/80 border border-amber-500/40 text-amber-300';
         } else {
-            statusBadge.className = 'text-[11px] font-bold uppercase px-2 py-0.5 rounded bg-rose-500/20 border border-rose-400/40 text-rose-200';
+            statusBadge.className = 'inline-flex items-center gap-1 text-xs font-bold uppercase px-2 py-0.5 rounded bg-rose-950/80 border border-rose-500/40 text-rose-300';
         }
     }
 
@@ -437,55 +548,43 @@ async function loadAccountStatement() {
         state.lastStatementTransactions = entries;
 
         if (consistencyBadge) {
+            consistencyBadge.classList.remove('hidden');
             if (data.is_balance_consistent) {
-                consistencyBadge.innerHTML = '<i class="fa-solid fa-check-double"></i> Reconciled';
-                consistencyBadge.className = 'text-[11px] font-semibold px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1';
+                consistencyBadge.innerHTML = '<i class="fa-solid fa-check-double"></i> Running Balance Verified';
+                consistencyBadge.className = 'ml-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800 inline-flex items-center gap-1';
             } else {
-                consistencyBadge.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Mismatch';
-                consistencyBadge.className = 'text-[11px] font-semibold px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200 flex items-center gap-1';
+                consistencyBadge.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Reconciliation Mismatch';
+                consistencyBadge.className = 'ml-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-100 text-rose-800 inline-flex items-center gap-1';
             }
         }
 
         if (entries.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" class="py-8 text-center text-slate-400">No ledger entries recorded for this account yet.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-400">No ledger entries recorded for this account yet.</td></tr>';
             return;
         }
 
-        // Show newest entries first while preserving exact runningBalance computed chronologically
         const reversed = [...entries].reverse();
         tbody.innerHTML = reversed
             .map(row => {
                 const isCredit = row.direction === 'CREDIT';
-                const badgeClass = isCredit
-                    ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
-                    : 'bg-rose-100 text-rose-800 border-rose-200';
-                const sign = isCredit ? '+' : '-';
+                const debitCell = !isCredit ? `-${formatMoney(row.amount)}` : '';
+                const creditCell = isCredit ? `+${formatMoney(row.amount)}` : '';
 
                 return `
                     <tr class="hover:bg-slate-50 transition">
                         <td class="py-3 px-4 text-slate-500 whitespace-nowrap">${escapeHtml(new Date(row.created_at).toLocaleString())}</td>
-                        <td class="py-3 px-4 font-medium text-slate-800">${escapeHtml(row.transaction_type)}</td>
-                        <td class="py-3 px-4 text-slate-600">
-                            <div>${escapeHtml(row.description || '---')}</div>
-                            <div class="text-[10px] font-mono text-slate-400">${escapeHtml(row.idempotency_key || '')}</div>
-                        </td>
-                        <td class="py-3 px-4">
-                            <span class="px-2 py-0.5 rounded text-[11px] font-bold border ${badgeClass}">
-                                ${escapeHtml(row.direction)}
-                            </span>
-                        </td>
-                        <td class="py-3 px-4 text-right font-mono font-semibold ${isCredit ? 'text-emerald-600' : 'text-rose-600'}">
-                            ${sign}${formatMoney(row.amount)}
-                        </td>
-                        <td class="py-3 px-4 text-right font-mono font-bold text-slate-900">
-                            ${formatMoney(row.running_balance)}
-                        </td>
+                        <td class="py-3 px-4 font-semibold text-slate-800">${escapeHtml(row.transaction_type)}</td>
+                        <td class="py-3 px-4 text-slate-600">${escapeHtml(row.description || '---')}</td>
+                        <td class="py-3 px-4 font-mono text-[10px] text-slate-400 max-w-[140px] truncate" title="${escapeHtml(row.idempotency_key || '')}">${escapeHtml(row.idempotency_key || '')}</td>
+                        <td class="py-3 px-4 text-right font-mono font-semibold text-rose-600">${escapeHtml(debitCell)}</td>
+                        <td class="py-3 px-4 text-right font-mono font-semibold text-emerald-600">${escapeHtml(creditCell)}</td>
+                        <td class="py-3 px-4 text-right font-mono font-bold text-slate-900">${formatMoney(row.running_balance)}</td>
                     </tr>
                 `;
             })
             .join('');
     } catch (err) {
-        tbody.innerHTML = `<tr><td colspan="6" class="py-6 text-center text-rose-600">${escapeHtml(err.message)}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="7" class="py-6 text-center text-rose-600">${escapeHtml(err.message)}</td></tr>`;
     }
 }
 
@@ -736,7 +835,7 @@ async function replayLastTransaction() {
 
         if (res.isCached) {
             showToast(
-                `IDEMPOTENT REPLAY VERIFIED (FR-15): Re-sending key "${idempotencyKey}" for "${label}" returned the cached response without executing twice!`,
+                `IDEMPOTENT REPLAY VERIFIED (FR-17): Re-sending key "${idempotencyKey}" for "${label}" returned the cached response without executing twice!`,
                 'success'
             );
         } else {
@@ -749,72 +848,6 @@ async function replayLastTransaction() {
 }
 
 // ============================================================================
-// CUSTOM LOGIN / SELF-REGISTRATION MODAL
-// ============================================================================
-
-function showLoginModal() {
-    state.authMode = 'login';
-    updateAuthModalUI();
-    document.getElementById('auth-username-input').value = '';
-    document.getElementById('auth-email-input').value = '';
-    document.getElementById('auth-password-input').value = '';
-    document.getElementById('auth-modal').classList.remove('hidden');
-}
-
-function toggleAuthMode() {
-    state.authMode = state.authMode === 'login' ? 'register' : 'login';
-    updateAuthModalUI();
-}
-
-function updateAuthModalUI() {
-    const isReg = state.authMode === 'register';
-    document.getElementById('auth-modal-title').textContent = isReg
-        ? 'Register Account Holder'
-        : 'Sign In to LedgerLine';
-    document.getElementById('auth-email-container').classList.toggle('hidden', !isReg);
-    document.getElementById('auth-email-input').required = isReg;
-    document.getElementById('auth-toggle-btn').textContent = isReg
-        ? 'Already have an account? Sign In'
-        : 'Need an account? Register';
-}
-
-async function handleAuthSubmit(event) {
-    event.preventDefault();
-    const username = document.getElementById('auth-username-input').value.trim();
-    const email = document.getElementById('auth-email-input').value.trim();
-    const password = document.getElementById('auth-password-input').value;
-
-    try {
-        if (state.authMode === 'register') {
-            await apiRequest('/auth/register', {
-                method: 'POST',
-                skipAuth: true,
-                body: JSON.stringify({ username, email, password })
-            });
-            closeModals();
-            showToast(
-                `Registered "${username}" with PENDING_APPROVAL status. Sign in as Admin to approve them before login (FR-6 / FR-7).`,
-                'success'
-            );
-        } else {
-            const data = await apiRequest('/auth/login', {
-                method: 'POST',
-                skipAuth: true,
-                body: JSON.stringify({ username, password })
-            });
-            state.token = data.token;
-            state.user = data.user;
-            localStorage.setItem('ledgerline_token', data.token);
-            closeModals();
-            onAuthSuccess();
-            showToast(`Welcome back, ${data.user.username}!`, 'success');
-        }
-    } catch (err) {
-        showToast(err.message, 'error');
-    }
-}
-
-// ============================================================================
 // ADMIN TAB: STATS, USER MANAGEMENT, ACCOUNT FREEZE/CLOSE, DEMO RESET
 // ============================================================================
 
@@ -823,9 +856,9 @@ async function loadAdminStats() {
         const data = await apiRequest('/admin/stats');
         const stats = data.stats || data;
         document.getElementById('stat-total-users').textContent = stats.users?.total_users ?? 0;
-        document.getElementById('stat-pending-users').textContent = stats.users?.pending_users ?? 0;
+        document.getElementById('stat-pending-users').textContent = `${stats.users?.pending_users ?? 0} pending approval`;
         document.getElementById('stat-total-accounts').textContent = stats.accounts?.total_accounts ?? 0;
-        document.getElementById('stat-total-balances').textContent = formatMoney(stats.accounts?.total_balances || 0);
+        document.getElementById('stat-total-balances').textContent = `Total: ${formatMoney(stats.accounts?.total_balances || 0)}`;
         document.getElementById('stat-total-tx').textContent = stats.transactions?.total_transactions ?? 0;
         document.getElementById('stat-total-audit').textContent = stats.audit?.total_audit_entries ?? 0;
     } catch (err) {
@@ -894,7 +927,7 @@ async function activateUser(userId) {
             method: 'POST'
         });
         showToast(res.message || 'User approved and activated.', 'success');
-        await Promise.all([loadAdminUsers(), loadAdminStats()]);
+        await Promise.all([loadAdminUsers(), loadAdminAccounts(), loadAdminStats()]);
     } catch (err) {
         showToast(`Failed to activate user: ${err.message}`, 'error');
     }
@@ -929,6 +962,7 @@ async function loadAdminAccounts() {
             CLOSED: 'bg-rose-100 text-rose-800 border-rose-200'
         };
 
+        // Matches header: Account Number | Owner | Type | Status | Balance | Actions
         tbody.innerHTML = accounts
             .map(acc => {
                 const isSystem = acc.account_type === 'SYSTEM_CLEARING';
@@ -952,12 +986,12 @@ async function loadAdminAccounts() {
                         <td class="py-3 px-4 font-mono font-semibold text-slate-800">${escapeHtml(acc.account_number)}</td>
                         <td class="py-3 px-4 text-slate-700">${escapeHtml(acc.owner_username || 'system')}</td>
                         <td class="py-3 px-4 text-[11px] font-mono text-slate-600">${escapeHtml(acc.account_type)}</td>
-                        <td class="py-3 px-4 text-right font-mono font-bold text-slate-900">${formatMoney(acc.balance)}</td>
                         <td class="py-3 px-4">
                             <span class="px-2 py-0.5 rounded text-[11px] font-bold border ${badgeStyles[acc.status] || 'bg-slate-100 text-slate-700'}">
                                 ${escapeHtml(acc.status)}
                             </span>
                         </td>
+                        <td class="py-3 px-4 text-right font-mono font-bold text-slate-900">${formatMoney(acc.balance)}</td>
                         <td class="py-3 px-4 text-right whitespace-nowrap">${buttons}</td>
                     </tr>
                 `;
@@ -1007,7 +1041,7 @@ async function handleAdminCreateUser(event) {
         });
         closeModals();
         showToast(`Created active user "${res.username}" (${res.role}).`, 'success');
-        await Promise.all([loadAdminUsers(), loadAdminStats()]);
+        await Promise.all([loadAdminUsers(), loadAdminAccounts(), loadAdminStats()]);
     } catch (err) {
         showToast(`Create user failed: ${err.message}`, 'error');
     }
@@ -1019,10 +1053,13 @@ async function resetDemoSeedData() {
     }
     try {
         const res = await apiRequest('/admin/reset-seed', { method: 'POST' });
-        showToast(res.message || 'Demo database reset cleanly while preserving audit logs.', 'success');
-        // Re-authenticate admin with fresh seeded user UUID so the current view continues cleanly
-        await loginAs('admin', { silent: true });
-        await verifyLedgerConservation();
+        clearSessionState();
+        showAuthScreen();
+        setAuthScreenMode('login');
+        setAuthFeedback(
+            res.message || 'Demo database reset to baseline while preserving immutable audit logs. Sign in again to continue.',
+            'success'
+        );
     } catch (err) {
         showToast(`Reset failed: ${err.message}`, 'error');
     }
@@ -1034,13 +1071,8 @@ async function resetDemoSeedData() {
 
 async function verifyLedgerConservation() {
     const headerStatus = document.getElementById('conservation-status-text');
-    if (!state.token) {
-        if (headerStatus) {
-            headerStatus.textContent = 'Sign in to inspect';
-            headerStatus.className = 'text-slate-600 font-semibold bg-slate-100 px-2 py-0.5 rounded border border-slate-200';
-        }
-        return;
-    }
+    if (!state.token) return;
+
     try {
         const data = await apiRequest('/ledger/conservation');
         const ledgerStats = data.ledger_stats || {};
@@ -1074,7 +1106,7 @@ async function verifyLedgerConservation() {
                 : 'Vault Mismatch';
         }
         if (diffEl) diffEl.textContent = diffFormatted;
-    } catch (err) {
+    } catch {
         if (headerStatus) {
             headerStatus.textContent = 'Unavailable';
         }
@@ -1185,7 +1217,7 @@ async function loadAuditLogs() {
 
 async function topUpForStressTest() {
     if (!state.user || !state.activeAccountId) {
-        showToast('Sign in as Alice or Bob with an active account first.', 'warning');
+        showToast('Sign in as an Account Holder with an active account first.', 'warning');
         return;
     }
 
@@ -1208,7 +1240,7 @@ async function topUpForStressTest() {
 
 async function runConcurrencyStressTest() {
     if (!state.user || !state.activeAccountId) {
-        showToast('Sign in as an Account Holder (e.g. Alice) before running the stress test.', 'warning');
+        showToast('Sign in as an Account Holder before running the stress test.', 'warning');
         return;
     }
 

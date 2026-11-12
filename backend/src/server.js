@@ -213,6 +213,13 @@ function createServer(dbInstance = null, options = {}) {
                 }
             }
 
+            if (pathname === '/api/auth/bootstrap-status' && method === 'GET') {
+                const existingAdmin = db.prepare(
+                    "SELECT COUNT(*) as cnt FROM users WHERE role = 'ADMIN' AND id != ?"
+                ).get(config.SYSTEM_USER_ID);
+                return sendJson(res, 200, { needsBootstrap: existingAdmin.cnt === 0 });
+            }
+
             if (pathname === '/api/auth/bootstrap' && method === 'POST') {
                 const body = await parseBody(req);
                 const result = authService.bootstrapAdmin(body);

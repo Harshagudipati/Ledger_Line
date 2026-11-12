@@ -76,6 +76,9 @@ Authenticates an `ACTIVE` user and issues an HMAC-SHA256 JWT token. Failed login
   - `401 INVALID_CREDENTIALS`
   - `403 ACCOUNT_PENDING_APPROVAL` / `403 ACCOUNT_DEACTIVATED`
 
+### `GET /api/auth/bootstrap-status`
+Public check returning `{ "needsBootstrap": true | false }` indicating whether zero `ADMIN` users exist and First-Admin Bootstrap is required.
+
 ### `POST /api/auth/bootstrap`
 First-admin bootstrap endpoint (FR-4). Succeeds **only** when zero non-system `ADMIN` users exist in the database.
 - **Request Body:** `{ "username": "...", "email": "...", "password": "..." }`
