@@ -565,6 +565,70 @@ class LedgerService {
             LIMIT ?
         `, userId, safeLimit);
     }
+
+    /**
+     * Full double-entry X-Ray breakdown for a single transaction (RBAC ownership enforced).
+     */
+    async getTransactionXRay(transactionId, requestingUser) {
+        const tx = await this.db.get(`
+            SELECT t.*, u.username as created_by_username,
+                   sa.account_number as source_account_number, sa.owner_id as source_owner_id,
+                   da.account_number as destination_account_number, da.owner_id as destination_owner_id
+            FROM transactions t
+            JOIN users u ON t.created_by = u.id
+            LEFT JOIN accounts sa ON t.source_account_id = sa.id
+            LEFT JOIN accounts da ON t.destination_account_id = da.id
+            WHERE t.id = ?
+        `, transactionId);
+
+        if (!tx) {
+            throw new Error('TRANSACTION_NOT_FOUND');
+        }
+
+        if (requestingUser.role === 'ACCOUNT_HOLDER') {
+            const ownsSource = tx.source_owner_id === requestingUser.userId;
+            const ownsDest = tx.destination_owner_id === requestingUser.userId;
+            if (!ownsSource && !ownsDest) {
+                throw new Error('UNAUTHORIZED_ACCOUNT_ACCESS');
+            }
+        }
+
+        const entries = await this.db.all(`
+            SELECT le.id, le.account_id, le.direction, le.amount, le.created_at,
+                   a.account_number, a.account_type, u.username as owner_username
+            FROM ledger_entries le
+            JOIN accounts a ON le.account_id = a.id
+            JOIN users u ON a.owner_id = u.id
+            WHERE le.transaction_id = ?
+            ORDER BY le.direction DESC, ${this.db.orderByInsertion('le', 'ASC')}
+        `, transactionId);
+
+        const idem = await this.db.get(`
+            SELECT key, request_path, request_params_hash, status, response_code, created_at
+            FROM idempotency_keys
+            WHERE key = ?
+        `, tx.idempotency_key);
+
+        let totalDebits = 0;
+        let totalCredits = 0;
+        const normalizedEntries = entries.map(e => {
+            const amt = Number(e.amount);
+            if (e.direction === 'DEBIT') totalDebits += amt;
+            else totalCredits += amt;
+            return { ...e, amount: amt };
+        });
+
+        return {
+            transaction: { ...tx, amount: Number(tx.amount) },
+            entries: normalizedEntries,
+            idempotency: idem || null,
+            proof: {
+                total_debits: totalDebits,
+                total_credits: totalCredits,
+                is_zero_sum_balanced: totalDebits === totalCredits && normalizedEntries.length >= 2
+            }
+        };
+    }
 }
 
 module.exports = { LedgerService };

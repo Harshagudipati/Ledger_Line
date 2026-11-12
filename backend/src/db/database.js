@@ -207,6 +207,14 @@ function ensureSqliteMigrations(db) {
     if (!userCols.includes('locked_until')) {
         db.exec('ALTER TABLE users ADD COLUMN locked_until TIMESTAMP;');
     }
+
+    const auditCols = db.prepare('PRAGMA table_info(audit_logs)').all().map(c => c.name);
+    if (!auditCols.includes('prev_hash')) {
+        db.exec('ALTER TABLE audit_logs ADD COLUMN prev_hash TEXT;');
+    }
+    if (!auditCols.includes('entry_hash')) {
+        db.exec('ALTER TABLE audit_logs ADD COLUMN entry_hash TEXT;');
+    }
 }
 
 function createSqliteDatabase(dbPath) {

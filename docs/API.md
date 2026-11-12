@@ -44,6 +44,14 @@ Public readiness probe verifying database connectivity (`SELECT 1`).
 Returns live service telemetry (`uptimeSeconds`, `totalRequests`, `avgLatencyMs`, `statusBuckets`, `authFailures`, `rateLimitBlocks`, `backends`, `memoryRssMb`, `recentRequests`).
 - **Auth:** `ADMIN`, `AUDITOR`.
 
+### `GET /api/openapi.json`
+Returns the live OpenAPI `3.0.3` JSON specification describing all REST routes, schemas, and Bearer JWT authentication.
+- **Auth:** Public.
+
+### `GET /api/events/stream`
+Opens an RBAC-scoped **Server-Sent Events (`text/event-stream`)** channel delivering real-time ledger (`transaction`), account lifecycle (`account`), and audit (`audit`) events filtered to the caller's role and owned accounts. Accepts `Authorization: Bearer <token>`.
+- **Auth:** Any authenticated role.
+
 ---
 
 ## 3. Authentication, Sessions & Bootstrap (FR-1, FR-2, FR-4, FR-6, FR-7)
@@ -101,6 +109,9 @@ Retrieves single account details. Enforces FR-3 ownership check (`403 UNAUTHORIZ
 ### `GET /api/accounts/:id/statement?transactionType=&fromDate=&toDate=&search=`
 Computes true chronological `running_balance` across all `ledger_entries` first (`calculated_balance === current_balance`) and optionally filters the returned `statement_entries` by type, date window, or description/idempotency search term.
 
+### `GET /api/accounts/:id/statement/export?transactionType=&fromDate=&toDate=&search=`
+Streams the filtered account statement with chronological running balances as `text/csv` (`ledgerline-statement-<accountNumber>.csv`). Enforces the same ownership rules as `/statement`.
+
 ### `POST /api/accounts/:id/close`
 Atomically closes an `ACTIVE` account (`status -> 'CLOSED'`). If `balance > 0`, requires `destinationAccountId` or `destinationAccountNumber` and performs an atomic double-entry balance sweep inside the same transaction before closing.
 - **Auth:** `ACCOUNT_HOLDER` (owner) or `ADMIN`.
@@ -133,6 +144,9 @@ Lists transactions scoped by account ownership for `ACCOUNT_HOLDER`.
 ### `GET /api/transactions/idempotency?limit=20`
 Returns the caller's recent `idempotency_keys` registry (`key`, `request_path`, `status`, `response_code`, `created_at`).
 
+### `GET /api/transactions/:id`
+Returns a Double-Entry X-Ray payload for a single transaction: transaction metadata, `idempotency` fingerprint (`request_hash`), chronological `entries` (`DEBIT` -> `CREDIT`), and balanced `proof` (`totalDebits`, `totalCredits`, `balanced`). Enforces account ownership for `ACCOUNT_HOLDER`.
+
 ---
 
 ## 6. Ledger Conservation & Audit Trail (FR-14, FR-15, FR-19, FR-21)
@@ -151,6 +165,10 @@ Searches and paginates append-only `audit_logs` records (protected by SQLite & P
 
 ### `GET /api/audit/logs/export?...`
 Streams matching `audit_logs` rows as `text/csv` (`ledgerline-audit-logs.csv`).
+- **Auth:** `AUDITOR`, `ADMIN`.
+
+### `GET /api/audit/verify-chain`
+Recomputes and verifies the SHA-256 hash chain (`prev_hash` -> `entry_hash`) sequentially across all `audit_logs` rows, proving tamper-free append-only history (`{ valid, totalEntries, headHash, firstBrokenId }`).
 - **Auth:** `AUDITOR`, `ADMIN`.
 
 ---

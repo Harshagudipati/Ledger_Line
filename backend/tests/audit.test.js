@@ -48,13 +48,18 @@ async function testAudit() {
     assert.strictEqual(deleteRejected, true, 'Direct SQL DELETE on audit_logs must be rejected by trigger');
     console.log('✓ SQL DELETE blocked by append-only immutability trigger');
 
-    console.log('4. Verifying filtered audit log retrieval...');
+    console.log('4. Verifying filtered audit log retrieval & SHA-256 hash-chain integrity...');
     const logs = await auditService.getLogs({ action: 'COMPLIANCE_CHECK', search: 'verified' });
     assert.strictEqual(logs.logs.length, 1);
     assert.strictEqual(logs.logs[0].id, auditId);
+    assert.ok(logs.logs[0].entry_hash, 'Audit row must include cryptographic entry_hash');
+
+    const chain = await auditService.verifyHashChain();
+    assert.strictEqual(chain.valid, true, 'Audit SHA-256 hash chain must verify cleanly');
+    assert.ok(chain.verifiedEntries >= 1);
 
     await db.close();
-    console.log('✓ PASS: Audit trail is strictly append-only and tamper-resistant!');
+    console.log('✓ PASS: Audit trail is strictly append-only, hash-chained & tamper-resistant!');
 }
 
 module.exports = { testAudit };

@@ -1,7 +1,14 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch, formatCents, formatDateTime } from '../api/client.js';
+import { TelemetryBreakdownCard } from '../components/Charts.jsx';
 
-export default function AdminDashboard({ user, notify }) {
+export default function AdminDashboard({
+  user,
+  notify,
+  masked = false,
+  refreshSignal = 0,
+  onOpenApi
+}) {
   const [stats, setStats] = useState(null);
   const [metrics, setMetrics] = useState(null);
   const [conservation, setConservation] = useState(null);
@@ -11,7 +18,6 @@ export default function AdminDashboard({ user, notify }) {
   const [accountSearch, setAccountSearch] = useState('');
   const [loading, setLoading] = useState(true);
 
-  // Create user modal
   const [showCreateUser, setShowCreateUser] = useState(false);
   const [newUsername, setNewUsername] = useState('');
   const [newEmail, setNewEmail] = useState('');
@@ -19,7 +25,6 @@ export default function AdminDashboard({ user, notify }) {
   const [newRole, setNewRole] = useState('AUDITOR');
   const [creating, setCreating] = useState(false);
 
-  // Reset confirmation modal
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetBusy, setResetBusy] = useState(false);
 
@@ -47,7 +52,7 @@ export default function AdminDashboard({ user, notify }) {
 
   useEffect(() => {
     loadAdminData();
-  }, [loadAdminData]);
+  }, [loadAdminData, refreshSignal]);
 
   async function handleUserAction(targetUser, action) {
     try {
@@ -139,10 +144,10 @@ export default function AdminDashboard({ user, notify }) {
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5">
           <div className="text-xs text-slate-400 mb-1">Total Customer Liquidity</div>
           <div className="text-2xl font-bold text-emerald-400 tabular-nums">
-            {formatCents(conservation?.balance_stats?.total_customer_balances)}
+            {formatCents(conservation?.balance_stats?.total_customer_balances, masked)}
           </div>
           <div className="text-xs text-slate-500 mt-1">
-            Clearing Vault: {formatCents(conservation?.balance_stats?.clearing_vault_balance)}
+            Clearing Vault: {formatCents(conservation?.balance_stats?.clearing_vault_balance, masked)}
           </div>
         </div>
 
@@ -177,9 +182,9 @@ export default function AdminDashboard({ user, notify }) {
         </div>
 
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5">
-          <div className="text-xs text-slate-400 mb-1">Runtime Telemetry</div>
+          <div className="text-xs text-slate-400 mb-1">Backends & Runtime</div>
           <div className="text-sm font-bold text-sky-400 font-mono">
-            {metrics ? `${metrics.totalRequests} reqs · ${metrics.avgLatencyMs}ms avg` : '—'}
+            {metrics ? `${metrics.totalRequests} reqs · ${metrics.avgLatencyMs}ms` : '—'}
           </div>
           <div className="text-xs text-slate-500 mt-1 font-mono">
             DB: {metrics?.backends?.database || '—'} · RL: {metrics?.backends?.rateLimiter || '—'}
@@ -187,12 +192,23 @@ export default function AdminDashboard({ user, notify }) {
         </div>
       </div>
 
+      {/* Visual Telemetry Breakdown & Latency Pulse */}
+      <TelemetryBreakdownCard metrics={metrics} />
+
       {/* Action Header */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900/70 border border-slate-800 rounded-2xl p-4">
         <div className="text-xs text-slate-300">
-          <strong className="text-white">Administrator Controls:</strong> Approve/unlock users, provision privileged roles, freeze/unfreeze accounts, and verify conservation invariants.
+          <strong className="text-white">Administrator Controls:</strong> Approve/unlock users, provision privileged roles, freeze accounts, and inspect OpenAPI specs.
         </div>
         <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={onOpenApi}
+            className="px-3 py-1.5 rounded-lg border border-slate-700 hover:border-sky-500/60 text-xs font-medium text-sky-300"
+          >
+            <i className="fa-solid fa-code mr-1.5" />
+            OpenAPI 3.0
+          </button>
           <button
             type="button"
             onClick={loadAdminData}
@@ -396,7 +412,7 @@ export default function AdminDashboard({ user, notify }) {
                       </span>
                     </td>
                     <td className="py-2.5 pr-3 text-right font-mono tabular-nums text-white">
-                      {formatCents(acc.balance)}
+                      {formatCents(acc.balance, masked)}
                     </td>
                     <td className="py-2.5 text-right whitespace-nowrap">
                       {isClearing ? (

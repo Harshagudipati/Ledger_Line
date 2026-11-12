@@ -19,7 +19,7 @@
 - **Modular React + Vite Frontend** with strict login gate, role-isolated workspaces (**Account Holder**, **Administrator**, **Auditor**), First-Admin Bootstrap wizard, and self-service password rotation
 - **Server-Side Session Revocation & Lockout:** JWT `jti` blocklist (`revoked_tokens`) on logout/password change plus automated failed-login lockout (`MAX_FAILED_LOGINS`)
 - **Dual Database & Limiter Adapters:** Zero-dependency **SQLite WAL** + in-memory sliding-window defaults for local/test speed, seamlessly switchable to **PostgreSQL (`DATABASE_URL` + `FOR UPDATE` locking + least-privilege roles)** and **Redis (`REDIS_URL` pure-Node RESP2 sliding window)**
-- **Observability & Compliance:** Structured JSON logs, `X-Request-Id` correlation headers, `/api/metrics` runtime telemetry, filtered statements, atomic account close with balance sweep, and CSV audit export
+- **Observability, Real-Time & Cryptographic Audit:** Structured JSON logs, `X-Request-Id` correlation, `/api/metrics` telemetry, **RBAC-scoped SSE live stream (`/api/events/stream`)**, **SHA-256 chained `audit_logs` (`/api/audit/verify-chain`)**, live **OpenAPI 3.0 (`/api/openapi.json`)**, filtered statement/audit CSV exports, **Double-Entry X-Ray**, **ACID Stress Lab**, `Ctrl+K` command palette, privacy balance masking, and interactive SVG charts
 
 ---
 
@@ -118,7 +118,8 @@ ledgerline/
 ├── backend/
 │   ├── src/
 │   │   ├── config.js              # Lightweight .env loader & fail-fast prod secret check
-│   │   ├── server.js              # HTTP API router, metrics, CSV export & SPA static host
+│   │   ├── openapi.js             # Live OpenAPI 3.0.3 JSON schema builder (/api/openapi.json)
+│   │   ├── server.js              # HTTP API router, metrics, SSE, CSV export & SPA static host
 │   │   ├── db/
 │   │   │   ├── database.js        # Unified SqliteAdapter & PgAdapter transaction layer
 │   │   │   ├── migrate.js         # Idempotent migration runner (schema_migrations)
@@ -128,21 +129,22 @@ ledgerline/
 │   │   │   └── seed.js            # Env-driven / random-password seed & audit-safe reset
 │   │   ├── middleware/
 │   │   │   ├── auth.js            # Async JWT verification & revoked_tokens check
+│   │   │   ├── eventHub.js        # RBAC-filtered Server-Sent Events (SSE) broadcast hub
 │   │   │   ├── rateLimiter.js     # Pure-Node Redis RESP2 sliding window + memory fallback
 │   │   │   └── telemetry.js       # X-Request-Id, structured JSON logs & /api/metrics
 │   │   └── services/
 │   │       ├── authService.js     # Register, login lockout, logout revoke, password rotation
 │   │       ├── accountService.js  # Ownership isolation, filtered statements, close sweep
-│   │       ├── ledgerService.js   # Double-entry, idempotency registry, conservation proof
-│   │       ├── auditService.js    # Append-only search/filter queries & recording
+│   │       ├── ledgerService.js   # Double-entry, Transaction X-Ray, conservation proof
+│   │       ├── auditService.js    # Append-only SHA-256 chained logs & verification
 │   │       └── adminService.js    # Provisioning, unlock/activate, stats
 │   └── tests/                     # 7 automated verification suites + testFixtures.js
 ├── frontend/                      # Modular React 18 + Vite application
 │   ├── index.html
 │   ├── vite.config.js
 │   └── src/
-│       ├── api/client.js          # Fetch client, integer cents helpers & CSV downloader
-│       ├── components/            # ToastContainer & ChangePasswordModal
+│       ├── api/client.js          # Fetch client, SSE connector, cents helpers & CSV exports
+│       ├── components/            # Charts, X-Ray, Proof Lab, Cmd+K, OpenAPI, Password & Toast
 │       └── pages/                 # AuthPage, HolderDashboard, AdminDashboard, AuditorDashboard
 └── docs/                          # API.md, ARCHITECTURE.md, DEMO_GUIDE.md, DEPLOYMENT.md
 ```

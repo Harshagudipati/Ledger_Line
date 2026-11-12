@@ -1,13 +1,45 @@
 // backend/src/services/auditService.js
 const crypto = require('node:crypto');
 
+function computeAuditHash({
+    prevHash,
+    id,
+    actorId,
+    actorUsername,
+    actorRole,
+    action,
+    entityType,
+    entityId,
+    detailsString,
+    ipAddress,
+    status
+}) {
+    const canonical = JSON.stringify({
+        prevHash: prevHash || 'GENESIS',
+        id,
+        actorId: actorId ?? null,
+        actorUsername: actorUsername ?? null,
+        actorRole: actorRole ?? null,
+        action,
+        entityType,
+        entityId: entityId ?? null,
+        details: detailsString ?? null,
+        ipAddress: ipAddress ?? null,
+        status
+    });
+    return crypto.createHash('sha256').update(canonical).digest('hex');
+}
+
 class AuditService {
-    constructor(db) {
+    constructor(db, onRecord = null) {
         this.db = db;
+        this.onRecord = onRecord;
+        this._chainTail = Promise.resolve();
     }
 
     /**
-     * Record an append-only audit event.
+     * Record an append-only, cryptographically hash-chained audit event.
+     * Serialized via an internal queue so concurrent operations produce an unbroken chain.
      */
     async record({
         actorId = null,
@@ -20,23 +52,143 @@ class AuditService {
         ipAddress = null,
         status = 'SUCCESS'
     }) {
-        const id = 'aud_' + crypto.randomUUID();
-        const detailsString = typeof details === 'object' && details !== null
-            ? JSON.stringify(details)
-            : details;
+        const writeTask = async () => {
+            const id = 'aud_' + crypto.randomUUID();
+            const detailsString = typeof details === 'object' && details !== null
+                ? JSON.stringify(details)
+                : (details ?? null);
 
-        await this.db.run(`
-            INSERT INTO audit_logs (
-                id, actor_id, actor_username, actor_role,
-                action, entity_type, entity_id, details,
-                ip_address, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-            id, actorId, actorUsername, actorRole,
-            action, entityType, entityId, detailsString,
-            ipAddress, status
-        );
-        return id;
+            const latest = await this.db.get(`
+                SELECT entry_hash
+                FROM audit_logs
+                WHERE entry_hash IS NOT NULL
+                ORDER BY ${this.db.orderByInsertion('audit_logs', 'DESC')}
+                LIMIT 1
+            `);
+            const prevHash = latest?.entry_hash || 'GENESIS';
+            const entryHash = computeAuditHash({
+                prevHash,
+                id,
+                actorId,
+                actorUsername,
+                actorRole,
+                action,
+                entityType,
+                entityId,
+                detailsString,
+                ipAddress,
+                status
+            });
+
+            await this.db.run(`
+                INSERT INTO audit_logs (
+                    id, actor_id, actor_username, actor_role,
+                    action, entity_type, entity_id, details,
+                    ip_address, status, prev_hash, entry_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `,
+                id, actorId, actorUsername, actorRole,
+                action, entityType, entityId, detailsString,
+                ipAddress, status, prevHash, entryHash
+            );
+
+            if (typeof this.onRecord === 'function') {
+                try {
+                    this.onRecord({
+                        id,
+                        actorId,
+                        actorUsername,
+                        actorRole,
+                        action,
+                        entityType,
+                        entityId,
+                        status,
+                        entryHash,
+                        createdAt: new Date().toISOString()
+                    });
+                } catch (_) {}
+            }
+
+            return id;
+        };
+
+        const run = this._chainTail.then(writeTask, writeTask);
+        this._chainTail = run.catch(() => {});
+        return run;
+    }
+
+    /**
+     * Walk audit_logs chronologically and mathematically verify every SHA-256 hash link.
+     */
+    async verifyHashChain() {
+        const rows = await this.db.all(`
+            SELECT id, actor_id, actor_username, actor_role, action, entity_type,
+                   entity_id, details, ip_address, status, prev_hash, entry_hash, created_at
+            FROM audit_logs
+            ORDER BY ${this.db.orderByInsertion('audit_logs', 'ASC')}
+        `);
+
+        let expectedPrev = 'GENESIS';
+        let verifiedEntries = 0;
+        let legacyUnchainedEntries = 0;
+
+        for (const row of rows) {
+            if (!row.entry_hash && !row.prev_hash) {
+                legacyUnchainedEntries++;
+                continue;
+            }
+
+            if (row.prev_hash !== expectedPrev) {
+                return {
+                    valid: false,
+                    totalEntries: rows.length,
+                    verifiedEntries,
+                    legacyUnchainedEntries,
+                    headHash: expectedPrev,
+                    brokenAtId: row.id,
+                    reason: `PREV_HASH_MISMATCH at ${row.id}`
+                };
+            }
+
+            const recomputed = computeAuditHash({
+                prevHash: row.prev_hash,
+                id: row.id,
+                actorId: row.actor_id,
+                actorUsername: row.actor_username,
+                actorRole: row.actor_role,
+                action: row.action,
+                entityType: row.entity_type,
+                entityId: row.entity_id,
+                detailsString: row.details,
+                ipAddress: row.ip_address,
+                status: row.status
+            });
+
+            if (recomputed !== row.entry_hash) {
+                return {
+                    valid: false,
+                    totalEntries: rows.length,
+                    verifiedEntries,
+                    legacyUnchainedEntries,
+                    headHash: expectedPrev,
+                    brokenAtId: row.id,
+                    reason: `ENTRY_HASH_MISMATCH at ${row.id}`
+                };
+            }
+
+            expectedPrev = row.entry_hash;
+            verifiedEntries++;
+        }
+
+        return {
+            valid: true,
+            totalEntries: rows.length,
+            verifiedEntries,
+            legacyUnchainedEntries,
+            headHash: expectedPrev,
+            brokenAtId: null,
+            reason: null
+        };
     }
 
     /**
@@ -92,7 +244,7 @@ class AuditService {
         const logs = await this.db.all(`
             SELECT id, actor_id, actor_username, actor_role,
                    action, entity_type, entity_id, details,
-                   ip_address, status, created_at
+                   ip_address, status, prev_hash, entry_hash, created_at
             FROM audit_logs
             ${where}
             ORDER BY ${this.db.orderByInsertion('audit_logs', 'DESC')}
@@ -116,4 +268,4 @@ class AuditService {
     }
 }
 
-module.exports = { AuditService };
+module.exports = { AuditService, computeAuditHash };
