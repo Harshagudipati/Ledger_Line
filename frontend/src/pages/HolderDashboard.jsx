@@ -2,21 +2,12 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   apiFetch,
   dollarsToCents,
-  downloadStatementCsv,
   formatCents,
   formatDateTime,
   newIdempotencyKey
 } from '../api/client.js';
-import { BalanceTrajectoryChart } from '../components/Charts.jsx';
 
-export default function HolderDashboard({
-  user,
-  notify,
-  masked = false,
-  refreshSignal = 0,
-  onInspectTx,
-  onOpenLab
-}) {
+export default function HolderDashboard({ user, notify }) {
   const [accounts, setAccounts] = useState([]);
   const [selectedAccountId, setSelectedAccountId] = useState('');
   const [recipients, setRecipients] = useState([]);
@@ -24,10 +15,9 @@ export default function HolderDashboard({
   const [idempotencyHistory, setIdempotencyHistory] = useState([]);
   const [conservation, setConservation] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [exportingCsv, setExportingCsv] = useState(false);
 
   // Money movement tab
-  const [txTab, setTxTab] = useState('deposit');
+  const [txTab, setTxTab] = useState('deposit'); // 'deposit' | 'withdraw' | 'transfer'
   const [amountInput, setAmountInput] = useState('');
   const [description, setDescription] = useState('');
   const [destAccountNumber, setDestAccountNumber] = useState('');
@@ -41,15 +31,20 @@ export default function HolderDashboard({
   const [filterFromDate, setFilterFromDate] = useState('');
   const [filterToDate, setFilterToDate] = useState('');
 
-  // Open / Close Account modals
+  // Open Account modal
   const [showOpenModal, setShowOpenModal] = useState(false);
   const [newAccType, setNewAccType] = useState('SAVINGS');
   const [openBusy, setOpenBusy] = useState(false);
+
+  // Close Account w/ Balance Sweep modal
   const [closeTarget, setCloseTarget] = useState(null);
   const [sweepDestId, setSweepDestId] = useState('');
   const [closeBusy, setCloseBusy] = useState(false);
 
-  const activeAccounts = useMemo(() => accounts.filter((a) => a.status === 'ACTIVE'), [accounts]);
+  const activeAccounts = useMemo(
+    () => accounts.filter((a) => a.status === 'ACTIVE'),
+    [accounts]
+  );
 
   const selectedAccount = useMemo(
     () => accounts.find((a) => a.id === selectedAccountId) || accounts[0] || null,
@@ -116,7 +111,7 @@ export default function HolderDashboard({
 
   useEffect(() => {
     loadDashboard();
-  }, [loadDashboard, refreshSignal]);
+  }, [loadDashboard]);
 
   async function handleSelectAccount(accId) {
     setSelectedAccountId(accId);
@@ -190,7 +185,7 @@ export default function HolderDashboard({
         );
       } else {
         notify(
-          `${txTab.toUpperCase()} completed (${formatCents(cents)}). Click statement row to inspect Double-Entry X-Ray.`,
+          `${txTab.toUpperCase()} completed (${formatCents(cents)}). Tx: ${res.transactionId}`,
           'success'
         );
         setAmountInput('');
@@ -201,24 +196,6 @@ export default function HolderDashboard({
       notify(err.message || 'Transaction failed.', 'error');
     } finally {
       setTxBusy(false);
-    }
-  }
-
-  async function handleExportStatementCsv() {
-    if (!selectedAccount) return;
-    setExportingCsv(true);
-    try {
-      await downloadStatementCsv(selectedAccount.id, selectedAccount.account_number, {
-        transactionType: filterType,
-        search: filterSearch,
-        fromDate: filterFromDate,
-        toDate: filterToDate
-      });
-      notify(`Exported statement CSV for ${selectedAccount.account_number}.`, 'success');
-    } catch (err) {
-      notify(err.message, 'error');
-    } finally {
-      setExportingCsv(false);
     }
   }
 
@@ -292,7 +269,7 @@ export default function HolderDashboard({
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5">
           <div className="text-xs text-slate-400 mb-1">Total Balance</div>
           <div className="text-2xl font-bold text-emerald-400 tabular-nums">
-            {formatCents(totalLiquidity, masked)}
+            {formatCents(totalLiquidity)}
           </div>
           <div className="text-xs text-slate-500 mt-1">
             Across {accounts.length} account{accounts.length === 1 ? '' : 's'}
@@ -309,24 +286,21 @@ export default function HolderDashboard({
           </div>
         </div>
 
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col justify-between">
-          <div>
-            <div className="text-xs text-slate-400 mb-1">ACID Verification Lab</div>
-            <div className="text-xs font-semibold text-emerald-400">
-              {conservation?.is_valid ? 'Ledger Conserved (Δ = $0.00)' : 'Checking...'}
-            </div>
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5">
+          <div className="text-xs text-slate-400 mb-1">Ledger Conservation</div>
+          <div className="text-base font-bold flex items-center gap-2">
+            {conservation?.is_valid ? (
+              <span className="text-emerald-400">
+                <i className="fa-solid fa-circle-check mr-1.5" />
+                BALANCED
+              </span>
+            ) : (
+              <span className="text-rose-400">CHECKING...</span>
+            )}
           </div>
-          <button
-            type="button"
-            onClick={() => onOpenLab?.(accounts)}
-            className="mt-2 px-3 py-1.5 rounded-lg bg-indigo-600/90 hover:bg-indigo-500 text-xs font-semibold text-white text-left flex items-center justify-between transition-colors"
-          >
-            <span>
-              <i className="fa-solid fa-flask-vial mr-1.5" />
-              Prove Concurrency & Idempotency
-            </span>
-            <i className="fa-solid fa-arrow-up-right-from-square text-[10px]" />
-          </button>
+          <div className="text-xs text-slate-500 mt-1">
+            Entries: {conservation?.ledger_stats?.entry_count ?? '—'}
+          </div>
         </div>
       </div>
 
@@ -394,7 +368,7 @@ export default function HolderDashboard({
                       <div className="flex items-end justify-between">
                         <div>
                           <div className="text-xl font-bold text-white tabular-nums">
-                            {formatCents(acc.balance, masked)}
+                            {formatCents(acc.balance)}
                           </div>
                           <div className="text-[11px] text-slate-500">{acc.currency}</div>
                         </div>
@@ -458,7 +432,7 @@ export default function HolderDashboard({
           </div>
         </div>
 
-        {/* Right: Money Movement Form + Trajectory Chart + Statement */}
+        {/* Right: Money Movement Form + Filtered Statement */}
         <div className="lg:col-span-7 space-y-6">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5">
             <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
@@ -607,13 +581,6 @@ export default function HolderDashboard({
             )}
           </div>
 
-          {/* Interactive SVG Balance Curve */}
-          <BalanceTrajectoryChart
-            entries={statement?.statement_entries || []}
-            masked={masked}
-            onSelectTx={(txId) => onInspectTx?.(txId)}
-          />
-
           {/* Filtered Statement Table */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5">
             <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
@@ -628,29 +595,18 @@ export default function HolderDashboard({
                     <span className={statement.is_balance_consistent ? 'text-emerald-400' : 'text-rose-400'}>
                       {statement.is_balance_consistent ? 'VERIFIED' : 'MISMATCH'}
                     </span>{' '}
-                    ({statement.statement_entries.length} of {statement.total_unfiltered_entries} entries · click any row for X-Ray)
+                    ({statement.statement_entries.length} of {statement.total_unfiltered_entries} entries)
                   </p>
                 )}
               </div>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  disabled={!selectedAccount || exportingCsv}
-                  onClick={handleExportStatementCsv}
-                  className="px-3 py-1.5 rounded-lg bg-emerald-700/80 hover:bg-emerald-600 disabled:opacity-50 text-xs font-semibold text-white"
-                >
-                  <i className="fa-solid fa-file-csv mr-1.5" />
-                  {exportingCsv ? 'Exporting...' : 'CSV'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => selectedAccount && loadStatement(selectedAccount.id)}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200"
-                >
-                  <i className="fa-solid fa-rotate mr-1.5" />
-                  Refresh
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => selectedAccount && loadStatement(selectedAccount.id)}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200"
+              >
+                <i className="fa-solid fa-rotate mr-1.5" />
+                Refresh
+              </button>
             </div>
 
             {/* Statement Filters */}
@@ -727,12 +683,7 @@ export default function HolderDashboard({
                     [...statement.statement_entries].reverse().map((row) => {
                       const isCredit = row.direction === 'CREDIT';
                       return (
-                        <tr
-                          key={row.entry_id}
-                          onClick={() => onInspectTx?.(row.transaction_id)}
-                          className="hover:bg-slate-800/50 cursor-pointer transition-colors"
-                          title="Click to inspect Double-Entry X-Ray"
-                        >
+                        <tr key={row.entry_id} className="hover:bg-slate-800/30">
                           <td className="py-2.5 pr-3 text-slate-400 whitespace-nowrap">
                             {formatDateTime(row.created_at)}
                           </td>
@@ -742,10 +693,7 @@ export default function HolderDashboard({
                             </span>
                           </td>
                           <td className="py-2.5 pr-3 text-slate-200">
-                            <div className="flex items-center gap-1.5">
-                              <span>{row.description || '—'}</span>
-                              <i className="fa-solid fa-magnifying-glass-chart text-[10px] text-sky-400/70" />
-                            </div>
+                            <div>{row.description || '—'}</div>
                             <div className="text-[10px] font-mono text-slate-500">{row.idempotency_key}</div>
                           </td>
                           <td
@@ -754,10 +702,10 @@ export default function HolderDashboard({
                             }`}
                           >
                             {isCredit ? '+' : '-'}
-                            {formatCents(row.amount, masked)}
+                            {formatCents(row.amount)}
                           </td>
                           <td className="py-2.5 text-right font-mono text-slate-200 tabular-nums whitespace-nowrap">
-                            {formatCents(row.running_balance, masked)}
+                            {formatCents(row.running_balance)}
                           </td>
                         </tr>
                       );
@@ -820,7 +768,7 @@ export default function HolderDashboard({
             </h3>
             <p className="text-xs text-slate-400 mb-4">
               Current balance:{' '}
-              <strong className="text-white">{formatCents(closeTarget.balance, masked)}</strong>.
+              <strong className="text-white">{formatCents(closeTarget.balance)}</strong>.
               Closing an account is permanent and preserves full historical ledger entries.
             </p>
             <form onSubmit={handleConfirmClose} className="space-y-4">
@@ -840,7 +788,7 @@ export default function HolderDashboard({
                       .filter((a) => a.id !== closeTarget.id)
                       .map((a) => (
                         <option key={a.id} value={a.id}>
-                          {a.account_number} ({a.account_type} · {formatCents(a.balance, masked)})
+                          {a.account_number} ({a.account_type} · {formatCents(a.balance)})
                         </option>
                       ))}
                     {recipients

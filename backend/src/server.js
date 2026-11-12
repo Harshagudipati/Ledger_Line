@@ -13,8 +13,6 @@ const { AdminService } = require('./services/adminService');
 const { authenticate } = require('./middleware/auth');
 const { RateLimiter } = require('./middleware/rateLimiter');
 const { TelemetryCollector } = require('./middleware/telemetry');
-const { EventHub } = require('./middleware/eventHub');
-const { buildOpenApiSpec } = require('./openapi');
 
 function escapeCsvCell(val) {
     const s = val === null || val === undefined ? '' : String(val);
@@ -29,10 +27,7 @@ function createServer(dbInstance = null, options = {}) {
         seedPromise = ensureSeeded(db, { passwords: options.seedPasswords });
     }
 
-    const eventHub = new EventHub();
-    const auditService = new AuditService(db, (auditEvent) => {
-        eventHub.publish('audit:event', auditEvent, [auditEvent.actorId]);
-    });
+    const auditService = new AuditService(db);
     const authService = new AuthService(db);
     const accountService = new AccountService(db, auditService);
     const ledgerService = new LedgerService(db, auditService);
@@ -124,28 +119,21 @@ function createServer(dbInstance = null, options = {}) {
 
         telemetry.beginRequest(req, res);
 
-        res.setHeader('X-Content-Type-Options', 'nosniff');
-        res.setHeader('X-Frame-Options', 'DENY');
-        res.setHeader('Referrer-Policy', 'no-referrer');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, X-Request-Id');
-
-        const parsedUrl = new URL(req.url || '/', 'http://localhost');
-        const pathname = parsedUrl.pathname;
-        const query = Object.fromEntries(parsedUrl.searchParams.entries());
-        const method = req.method;
-        const ipAddress = getClientIp(req);
-
-        if (pathname.startsWith('/api/') && pathname !== '/api/events/stream') {
-            res.setHeader('Cache-Control', 'no-store');
-        }
 
         if (req.method === 'OPTIONS') {
             res.writeHead(204);
             res.end();
             return;
         }
+
+        const parsedUrl = new URL(req.url || '/', 'http://localhost');
+        const pathname = parsedUrl.pathname;
+        const query = Object.fromEntries(parsedUrl.searchParams.entries());
+        const method = req.method;
+        const ipAddress = getClientIp(req);
 
         // Rate limiting (auth routes have dedicated tighter brute-force limits)
         if (pathname === '/api/auth/login' || pathname === '/api/auth/register' || pathname === '/api/auth/bootstrap') {
@@ -186,16 +174,6 @@ function createServer(dbInstance = null, options = {}) {
                     dbDialect: db.dialect,
                     rateLimitBackend: apiLimiter.getBackendMode()
                 }));
-            }
-
-            if (pathname === '/api/openapi.json' && method === 'GET') {
-                return sendJson(res, 200, buildOpenApiSpec());
-            }
-
-            if (pathname === '/api/events/stream' && method === 'GET') {
-                if (!(await authenticate(req, res, db))) return;
-                eventHub.subscribe(req, res, req.user);
-                return;
             }
 
             // ----------------------------------------------------------------
@@ -352,36 +330,6 @@ function createServer(dbInstance = null, options = {}) {
                 return sendJson(res, 201, { account });
             }
 
-            const statementExportMatch = pathname.match(/^\/api\/accounts\/([^/]+)\/statement\/export$/);
-            if (statementExportMatch && method === 'GET') {
-                if (!(await authenticate(req, res, db))) return;
-                const accountId = statementExportMatch[1];
-                const statement = await accountService.getAccountStatement(accountId, req.user, {
-                    transactionType: query.transactionType || null,
-                    fromDate: query.fromDate || null,
-                    toDate: query.toDate || null,
-                    search: query.search || null
-                });
-                const header = ['created_at', 'transaction_id', 'transaction_type', 'direction', 'amount_cents', 'running_balance_cents', 'description', 'idempotency_key'];
-                const rows = statement.statement_entries.map(e => [
-                    escapeCsvCell(e.created_at),
-                    escapeCsvCell(e.transaction_id),
-                    escapeCsvCell(e.transaction_type),
-                    escapeCsvCell(e.direction),
-                    escapeCsvCell(e.amount),
-                    escapeCsvCell(e.running_balance),
-                    escapeCsvCell(e.description || ''),
-                    escapeCsvCell(e.idempotency_key)
-                ].join(','));
-
-                res.writeHead(200, {
-                    'Content-Type': 'text/csv; charset=utf-8',
-                    'Content-Disposition': `attachment; filename="ledgerline-statement-${statement.account.account_number}.csv"`
-                });
-                res.end([header.join(','), ...rows].join('\n'));
-                return;
-            }
-
             const statementMatch = pathname.match(/^\/api\/accounts\/([^/]+)\/statement$/);
             if (statementMatch && method === 'GET') {
                 if (!(await authenticate(req, res, db))) return;
@@ -407,11 +355,6 @@ function createServer(dbInstance = null, options = {}) {
                     destinationAccountNumber: body.destinationAccountNumber || null,
                     actor: req.user
                 });
-                eventHub.publish(
-                    'account:status',
-                    { accountId: result.account.id, status: 'CLOSED', sweptAmount: result.sweptAmount },
-                    [result.account.owner_id, req.user.userId]
-                );
                 return sendJson(res, 200, result);
             }
 
@@ -453,10 +396,6 @@ function createServer(dbInstance = null, options = {}) {
                     actor: req.user
                 });
 
-                if (!result.isCached) {
-                    eventHub.publish('ledger:tx', { type: 'DEPOSIT', ...result }, [req.user.userId]);
-                }
-
                 return sendJson(res, result.isCached ? 200 : 201, result);
             }
 
@@ -480,10 +419,6 @@ function createServer(dbInstance = null, options = {}) {
                     description: body.description,
                     actor: req.user
                 });
-
-                if (!result.isCached) {
-                    eventHub.publish('ledger:tx', { type: 'WITHDRAWAL', ...result }, [req.user.userId]);
-                }
 
                 return sendJson(res, result.isCached ? 200 : 201, result);
             }
@@ -511,15 +446,6 @@ function createServer(dbInstance = null, options = {}) {
                     actor: req.user
                 });
 
-                if (!result.isCached) {
-                    const destAcc = await accountService.getAccountById(result.destinationAccountId);
-                    eventHub.publish(
-                        'ledger:tx',
-                        { type: 'TRANSFER', ...result },
-                        [req.user.userId, destAcc?.owner_id]
-                    );
-                }
-
                 return sendJson(res, result.isCached ? 200 : 201, result);
             }
 
@@ -546,13 +472,6 @@ function createServer(dbInstance = null, options = {}) {
                     type: query.type || null
                 });
                 return sendJson(res, 200, { transactions });
-            }
-
-            const txDetailMatch = pathname.match(/^\/api\/transactions\/([^/]+)$/);
-            if (txDetailMatch && method === 'GET') {
-                if (!(await authenticate(req, res, db))) return;
-                const xray = await ledgerService.getTransactionXRay(txDetailMatch[1], req.user);
-                return sendJson(res, 200, xray);
             }
 
             // ----------------------------------------------------------------
@@ -596,16 +515,8 @@ function createServer(dbInstance = null, options = {}) {
             }
 
             // ----------------------------------------------------------------
-            // 6. Audit Logs, Hash Chain Verification & CSV Export (FR-19, FR-21)
+            // 6. Audit Logs & CSV Export (FR-19, FR-21)
             // ----------------------------------------------------------------
-            if (pathname === '/api/audit/verify-chain' && method === 'GET') {
-                if (!(await authenticate(req, res, db))) return;
-                if (!(await authorizeRole(req, res, 'AUDITOR', 'ADMIN'))) return;
-
-                const verification = await auditService.verifyHashChain();
-                return sendJson(res, 200, verification);
-            }
-
             if (pathname === '/api/audit/logs/export' && method === 'GET') {
                 if (!(await authenticate(req, res, db))) return;
                 if (!(await authorizeRole(req, res, 'AUDITOR', 'ADMIN'))) return;
@@ -710,11 +621,6 @@ function createServer(dbInstance = null, options = {}) {
 
                 const body = await parseBody(req);
                 const account = await accountService.updateAccountStatus(accountStatusMatch[1], body.status, req.user);
-                eventHub.publish(
-                    'account:status',
-                    { accountId: account.id, accountNumber: account.account_number, status: account.status },
-                    [account.owner_id]
-                );
                 return sendJson(res, 200, { account });
             }
 
@@ -819,7 +725,6 @@ function createServer(dbInstance = null, options = {}) {
                 'CANNOT_DEACTIVATE_SYSTEM_ROOT': 403,
                 'FORBIDDEN': 403,
                 'ACCOUNT_NOT_FOUND': 404,
-                'TRANSACTION_NOT_FOUND': 404,
                 'SOURCE_ACCOUNT_NOT_FOUND': 404,
                 'DESTINATION_ACCOUNT_NOT_FOUND': 404,
                 'USER_NOT_FOUND': 404,
@@ -839,10 +744,6 @@ function createServer(dbInstance = null, options = {}) {
                 message: err.message
             });
         }
-    });
-
-    server.on('close', () => {
-        eventHub.closeAll();
     });
 
     return server;

@@ -69,15 +69,3 @@ Watch startup console output for generated (or `.env`-configured) demo persona c
 ### Scenario D: Self-Service Password Rotation
 1. Click **Password** in the sticky top header from any authenticated session.
 2. Update your password via `POST /api/auth/change-password` — the backend revokes the previous JWT and rotates a fresh token into your browser automatically.
-
----
-
-## 4. Interactive Verification & Real-Time Features
-
-- **`Ctrl+K` / `Cmd+K` Command Palette:** Press `Ctrl+K` (or click **Cmd+K** in the header) from any workspace to jump between tabs, toggle privacy masking, export CSVs, or open modals cleanly via keyboard.
-- **`LIVE` Real-Time SSE Feed (`GET /api/events/stream`):** Toggle the **`LIVE`** ticker badge in the top bar to stream live double-entry transactions, account state changes, and audit events scoped strictly to your role (`fetch` `ReadableStream` with Bearer auth).
-- **Double-Entry Transaction X-Ray (`GET /api/transactions/:id`):** Click any row in **Account Statement**, **Balance Trajectory Chart**, or **Double-Entry Ledger Inspector** to inspect exact `DEBIT` -> `CREDIT` legs, SHA-256 request hash, idempotency key, and raw JSON.
-- **ACID Verification & Stress Lab:** Click **ACID Stress Lab** inside the Account Holder workspace to fire **20 genuine parallel `Promise.all` withdrawals** against an ephemeral test account (proving atomic serialization and zero overdraft) plus **live idempotency replay (`200`) / payload tamper (`422`)** proofs.
-- **Interactive SVG Charts:** Hover over points on **Account Balance Trajectory** (Holder) or **HTTP Status & Latency Breakdown** (Admin) to inspect exact transaction deltas and latency telemetry.
-- **Privacy Balance Masking:** Toggle **Mask Balances / Show Balances** in the top header to obfuscate dollar amounts during live demos (`$••••••`).
-- **SHA-256 Audit Chain Verifier (`GET /api/audit/verify-chain`) & Filtered Statement CSV:** Verify cryptographic `prev_hash` -> `entry_hash` tamper-evidence across every `audit_logs` record on the **Auditor Console**, or export filtered account statements (`ledgerline-statement-<account>.csv`) and inspect live OpenAPI 3.0 contracts (`OpenAPI 3.0` modal).

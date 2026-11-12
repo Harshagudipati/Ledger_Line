@@ -98,8 +98,6 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     details TEXT,
     ip_address TEXT,
     status TEXT NOT NULL CHECK(status IN ('SUCCESS', 'FAILURE', 'UNAUTHORIZED')),
-    prev_hash TEXT,
-    entry_hash TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

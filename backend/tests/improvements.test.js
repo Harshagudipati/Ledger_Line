@@ -284,53 +284,8 @@ async function testImprovements() {
     assert.ok(auditCsv.body.includes('USER_LOGOUT'));
     console.log('✓ 6. /api/metrics telemetry & /api/audit/logs/export CSV verified');
 
-    // Audit SHA-256 hash chain verification, Transaction X-Ray, Statement CSV, OpenAPI & Security Headers
-    const holderVerifyForbidden = await dispatchHttp(server, {
-        method: 'GET',
-        path: '/api/audit/verify-chain',
-        headers: { Authorization: `Bearer ${aliceFreshToken}` }
-    });
-    assert.strictEqual(holderVerifyForbidden.statusCode, 403);
-
-    const chainRes = await dispatchHttp(server, {
-        method: 'GET',
-        path: '/api/audit/verify-chain',
-        headers: { Authorization: `Bearer ${adminToken}` }
-    });
-    assert.strictEqual(chainRes.statusCode, 200);
-    assert.strictEqual(chainRes.json.valid, true);
-    assert.ok(chainRes.json.verifiedEntries >= 5);
-
-    const sweepTxId = closeRes.json.sweepTransactionId;
-    const xrayRes = await dispatchHttp(server, {
-        method: 'GET',
-        path: `/api/transactions/${sweepTxId}`,
-        headers: { Authorization: `Bearer ${aliceFreshToken}` }
-    });
-    assert.strictEqual(xrayRes.statusCode, 200);
-    assert.strictEqual(xrayRes.json.proof.is_zero_sum_balanced, true);
-    assert.strictEqual(xrayRes.json.entries.length, 2);
-
-    const stmtCsv = await dispatchHttp(server, {
-        method: 'GET',
-        path: `/api/accounts/${primaryAcc.id}/statement/export`,
-        headers: { Authorization: `Bearer ${aliceFreshToken}` }
-    });
-    assert.strictEqual(stmtCsv.statusCode, 200);
-    assert.ok(stmtCsv.headers['content-type'].includes('text/csv'));
-    assert.ok(stmtCsv.body.includes(sweepTxId));
-
-    const openApiRes = await dispatchHttp(server, { method: 'GET', path: '/api/openapi.json' });
-    assert.strictEqual(openApiRes.statusCode, 200);
-    assert.strictEqual(openApiRes.json.openapi, '3.0.3');
-    assert.strictEqual(openApiRes.headers['x-content-type-options'], 'nosniff');
-    assert.strictEqual(openApiRes.headers['x-frame-options'], 'DENY');
-    assert.strictEqual(openApiRes.headers['cache-control'], 'no-store');
-    console.log('✓ 7. Audit hash-chain verifier, Tx X-Ray, Statement CSV, OpenAPI 3.0 & security headers verified');
-
-    server.close();
     await db.close();
-    console.log('✓ PASS: All Phase 1 & Interactive Standard upgrades verified!');
+    console.log('✓ PASS: All Phase 1 hardening & new API capabilities verified!');
 }
 
 module.exports = { testImprovements };
